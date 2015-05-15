@@ -17,16 +17,20 @@
  * along with Cockpit; If not, see <http://www.gnu.org/licenses/>.
  */
 
-/* global jQuery   */
-/* global cockpit  */
-/* global _        */
-/* global C_       */
-/* global Mustache */
+define([
+    "jquery",
+    "base1/cockpit",
+    "base1/mustache",
+    "manifests",
+    "shell/controls",
+    "shell/shell",
+    "shell/cockpit-main",
+    "shell/cockpit-util",
+], function($, cockpit, Mustache, manifests, controls, shell) {
+"use strict";
 
-var shell = shell || { };
-var modules = modules || { };
-
-(function($, cockpit, shell, modules) {
+var _ = cockpit.gettext;
+var C_ = cockpit.gettext;
 
 function resource_debug() {
     if (window.debugging == "all" || window.debugging == "resource")
@@ -40,17 +44,27 @@ function docker_debug() {
 
 var docker_clients = shell.util.make_resource_cache();
 
-shell.docker = docker;
-function docker() {
+shell.docker = docker_client;
+function docker_client() {
     return docker_clients.get("default", function () { return new DockerClient(); });
 }
 
-function quote_cmdline (cmds) {
-    return modules.docker.quote_cmdline(cmds || []);
+var docker;
+
+if (manifests["docker"]) {
+    require([
+        'docker/docker'
+    ], function(d) {
+        docker = d;
+    });
 }
 
-function unquote_cmdline (string) {
-    return modules.docker.unquote_cmdline(string);
+function quote_cmdline(cmds) {
+    return docker.quote_cmdline(cmds || []);
+}
+
+function unquote_cmdline(string) {
+    return docker.unquote_cmdline(string);
 }
 
 function render_container_cmdline (container) {
@@ -272,17 +286,20 @@ function setup_for_failure(page, client) {
     function show_failure(ex) {
         var msg;
         var show_start = false;
-        console.warn(ex);
 
-        if (typeof ex == "string")
+        if (typeof ex == "string") {
             msg = ex;
-        else if (ex.problem == "not-found") {
+            console.warn(ex);
+        } else if (ex.problem == "not-found") {
             msg = _("Docker is not installed or activated on the system");
             show_start = true;
-        } else if (ex.problem == "not-authorized")
+        } else if (ex.problem == "access-denied") {
             msg = _("Not authorized to access Docker on this system");
-        else
+        } else {
             msg = cockpit.format(_("Can't connect to Docker: $0"), ex.toString());
+            console.warn(ex);
+        }
+        $("#containers-failure-waiting").hide();
         $("#containers-failure-message").text(msg);
 
         $("#containers-failure-start").toggle(show_start);
@@ -315,6 +332,9 @@ function setup_for_failure(page, client) {
     });
 
     $('#containers-failure-start').on('click.failure', function () {
+        $("#containers-failure-start").hide();
+        $("#containers-failure-message").text(_("Starting docker"));
+        $("#containers-failure-waiting").show();
         cockpit.spawn([ "systemctl", "start", "docker" ], { "superuser": true }).
             done(function () {
                 client.close();
@@ -339,6 +359,81 @@ function unsetup_for_failure(client) {
     $('#containers-failure-start').off('.failure');
 }
 
+function docker_container_delete(docker_client, container_id, on_success, on_failure) {
+    docker_client.rm(container_id).
+        fail(function(ex) {
+            /* if container is still running, ask user to force delete */
+            if (ex.message.indexOf('remove a running container') > -1) {
+                var container_info = docker_client.containers[container_id];
+                var msg;
+                if (container_info.State.Running) {
+                    msg = _("Container is currently running.");
+                } else {
+                    msg = _("Container is currently marked as not running, but regular stopping failed.") +
+                      " " + _("Error message from Docker:") +
+                      " '" + ex.message + "'";
+                }
+                var name;
+                if (container_info.Name)
+                    name = container_info.Name;
+                else
+                    name = container_id;
+                if (name.charAt(0) === '/')
+                    name = name.substring(1);
+                shell.confirm(cockpit.format(_("Please confirm forced deletion of $0"), name),
+                    msg,
+                    _("Force Delete")).
+                    done(function () {
+                        docker_client.rm(container_id, true).
+                            fail(function(ex) {
+                                shell.show_unexpected_error(ex);
+                                on_failure();
+                            }).
+                            done(on_success);
+                    }).
+                    fail(on_failure);
+                return;
+            }
+            shell.show_unexpected_error(ex);
+            on_failure();
+        }).
+        done(on_success);
+}
+
+/* if error message points to leftover scope, try to resolve the issue */
+function handle_scope_start_container(docker_client, container_id, error_message, on_success, on_failure) {
+    var end_phrase = '.scope already exists';
+    var idx_end = error_message.indexOf(end_phrase);
+    /* HACK: workaround for https://github.com/docker/docker/issues/7015 */
+    if (idx_end > -1) {
+        var start_phrase = 'Unit docker-';
+        var idx_start = error_message.indexOf(start_phrase) + start_phrase.length;
+        var docker_container = error_message.substring(idx_start, idx_end);
+        cockpit.spawn([ "systemctl", "stop", "docker-" + docker_container + ".scope" ], { "superuser": true }).
+            done(function () {
+                docker_client.start(container_id).
+                    fail(function(ex) {
+                        if (on_failure)
+                            on_failure();
+                    }).
+                    done(function() {
+                        if (on_success)
+                            on_success();
+                    });
+                return;
+            }).
+            fail(function (error) {
+                shell.show_unexpected_error(cockpit.format(_("Failed to stop Docker scope: $0"), error));
+                if (on_failure)
+                    on_failure();
+            });
+        return;
+    }
+    shell.show_unexpected_error(error_message);
+    if (on_failure)
+        on_failure();
+}
+
 function render_container (client, $panel, filter_button, prefix, id, container, danger_mode) {
     var tr = $("#" + prefix + id);
 
@@ -358,8 +453,8 @@ function render_container (client, $panel, filter_button, prefix, id, container,
     if (container.State && container.State.Running) {
         cputext = format_cpu_usage(container.CpuUsage);
 
-        memuse = container.MemoryUsage || 0;
-        memlimit = container.MemoryLimit || 0;
+        memuse = container.MemoryUsage;
+        memlimit = container.MemoryLimit;
         memtext = format_memory_and_limit(memuse, memlimit);
 
         membar = true;
@@ -374,34 +469,29 @@ function render_container (client, $panel, filter_button, prefix, id, container,
     var added = false;
     if (!tr.length) {
         $panel.find('button.enable-danger').toggle(true);
-        var img_waiting = $('<div class="waiting">');
+        var img_waiting = $('<div class="spinner">');
         var btn_delete = $('<button class="btn btn-danger pficon pficon-delete btn-delete">').
             on("click", function() {
                 var self = this;
                 $(self).hide().
-                    siblings("div.waiting").show();
-                client.rm(id, true).
-                    fail(function(ex) {
-                        shell.show_unexpected_error(ex);
-                        $(self).show().
-                            siblings("div.waiting").hide();
-                    });
+                    siblings("div.spinner").show();
+                docker_container_delete(client, id, function() { }, function () { $(self).show().siblings("div.spinner").hide(); });
                 return false;
             });
-        var btn_play = $('<button class="btn btn-default btn-control btn-play">').
+        var btn_play = $('<button class="btn btn-default btn-control fa fa-play">').
             on("click", function() {
                 $(this).hide().
-                    siblings("div.waiting").show();
+                    siblings("div.spinner").show();
                 client.start(id).
                     fail(function(ex) {
-                        shell.show_unexpected_error(ex);
+                        handle_scope_start_container(client, id, ex.message);
                     });
                 return false;
             });
-        var btn_stop = $('<button class="btn btn-default btn-control btn-stop">').
+        var btn_stop = $('<button class="btn btn-default btn-control fa fa-stop">').
             on("click", function() {
                 $(this).hide().
-                    siblings("div.waiting").show();
+                    siblings("div.spinner").show();
                 client.stop(id).
                     fail(function(ex) {
                         shell.show_unexpected_error(ex);
@@ -413,7 +503,7 @@ function render_container (client, $panel, filter_button, prefix, id, container,
             $('<td class="container-col-image">'),
             $('<td class="container-col-command">'),
             $('<td class="container-col-cpu">'),
-            $('<td class="container-col-memory-graph">').append(shell.BarRow("containers-containers")),
+            $('<td class="container-col-memory-graph">').append(controls.BarRow("containers-containers")),
             $('<td class="container-col-memory-text">'),
             $('<td class="container-col-danger cell-buttons">').append(btn_delete, img_waiting),
             $('<td class="container-col-actions cell-buttons">').append(btn_play, btn_stop, img_waiting.clone()));
@@ -436,7 +526,7 @@ function render_container (client, $panel, filter_button, prefix, id, container,
         text(memtext);
 
     var waiting = id in client.waiting;
-    $(row[6]).children("div.waiting").toggle(waiting);
+    $(row[6]).children("div.spinner").toggle(waiting);
     $(row[6]).children("button.btn-delete")
         .toggle(!waiting)
         .toggleClass('disabled', container.State.Running);
@@ -449,9 +539,9 @@ function render_container (client, $panel, filter_button, prefix, id, container,
           .tooltip({html: true});
 
 
-    $(row[7]).children("div.waiting").toggle(waiting);
-    $(row[7]).children("button.btn-play").toggle(!waiting && !container.State.Running);
-    $(row[7]).children("button.btn-stop").toggle(!waiting && container.State.Running);
+    $(row[7]).children("div.spinner").toggle(waiting);
+    $(row[7]).children("button.fa-play").toggle(!waiting && !container.State.Running);
+    $(row[7]).children("button.fa-stop").toggle(!waiting && container.State.Running);
 
     $(row[6]).toggle(danger_mode);
     $(row[7]).toggle(!danger_mode);
@@ -655,16 +745,16 @@ PageContainers.prototype = {
                     avail = value[1];
             });
 
-            if (used && total) {
+            if (used && total && docker) {
 
-              var b_used = modules.docker.bytes_from_format(used);
-              var b_total = modules.docker.bytes_from_format(total);
+              var b_used = docker.bytes_from_format(used);
+              var b_total = docker.bytes_from_format(total);
 
               // Prefer available if present as that will be accurate for
               // sparse file based devices
               if (avail) {
                   $('#containers-storage').tooltip('destroy');
-                  b_total = modules.docker.bytes_from_format(avail);
+                  b_total = docker.bytes_from_format(avail);
                   total = cockpit.format_bytes(b_used + b_total);
               } else {
                   var warning = _("WARNING: Docker may be reporting the size it has allocated to it's storage pool using sparse files, not the actual space available to the underlying storage device.");
@@ -672,7 +762,7 @@ PageContainers.prototype = {
               }
 
               var formated = used + " / " + total;
-              var bar_row = shell.BarRow();
+              var bar_row = controls.BarRow();
               bar_row.attr("value", b_used + "/" + b_total);
               bar_row.toggleClass("bar-row-danger", used > 0.95 * total);
 
@@ -703,7 +793,7 @@ PageContainers.prototype = {
 
         var added = false;
         if (!tr.length) {
-            var button = $('<button class="btn btn-default btn-control btn-play">').
+            var button = $('<button class="btn btn-default btn-control fa fa-play">').
                 on("click", function() {
                     PageRunImage.display(self.client, id);
                     return false;
@@ -1433,6 +1523,7 @@ PageSearchImage.prototype = {
 
     start_download: function(event) {
         var repo = $('#containers-search-download').data('repo');
+        var registry = $('#containers-search-download').data('registry') || undefined;
         var tag = $('#containers-search-tag').val();
 
         $('#containers-search-tag').prop('disabled', true);
@@ -1450,55 +1541,46 @@ PageSearchImage.prototype = {
 
         insert_table_sorted($('#containers-images table'), tr);
 
-        var created = tr.children('td').eq(1);
-        var size = tr.children('td').eq(2);
+        var created = tr.children('td.container-col-created');
+        var size = tr.children('td.image-col-size-text');
 
         var failed = false;
         var layers = {};
-        var buffer = "";
 
-        this.client.pull(repo, tag).
-            stream(function(data) {
-                buffer += data;
-                var next = modules.docker.json_skip(buffer, 0);
-                if (next === 0)
-                    return; /* not enough data yet */
-                var progress = JSON.parse(buffer.substring(0, next));
-                buffer = buffer.substring(next);
-                if ("error" in progress) {
-                    failed = true;
-                    created.text = 'Error downloading';
-                    size.text('Error downloading: ' + progress['errorDetail']['message']);
-                    tr.on('click', function() {
-                        // Make the row be gone when clicking it
-                        tr.remove();
-                    });
-                }
-                else if("status" in progress) {
-                    if("id" in progress) {
-                        var new_string = progress['status'];
-                        if(progress['status'] == 'Downloading') {
-                            new_string += ': ' + progress['progressDetail']['current'] + '/' + progress['progressDetail']['total'];
-                        }
-                        layers[progress['id']] = new_string;
-                        if(progress['status'] == 'Download complete') {
-                            // We probably don't care anymore about completed layers
-                            // This also keeps the size of the row to a minimum
-                            delete layers[progress['id']];
-                        }
+        docker.pull(repo, tag, registry).
+            progress(function(message, progress) {
+                if("id" in progress) {
+                    var new_string = progress['status'];
+                    if(progress['status'] == 'Downloading') {
+                        new_string += ': ' + progress['progressDetail']['current'] + '/' + progress['progressDetail']['total'];
                     }
-                    var full_status = '';
-                    for(var layer in layers) {
-                        full_status += layer + ': ' + layers[layer] + '&nbsp;&nbsp;&nbsp;&nbsp;';
+                    layers[progress['id']] = new_string;
+                    if(progress['status'] == 'Download complete') {
+                        // We probably don't care anymore about completed layers
+                        // This also keeps the size of the row to a minimum
+                        delete layers[progress['id']];
                     }
-                    size.html(full_status);
                 }
+                var full_status = '';
+                for(var layer in layers) {
+                    full_status += layer + ': ' + layers[layer] + '&nbsp;&nbsp;&nbsp;&nbsp;';
+                }
+                size.html(full_status);
             }).
-            done(function() {
-                // According to Docker, download was finished.
-                if(!failed) {
+            fail(function(ex) {
+                console.warn("pull failed:", ex);
+                failed = true;
+                created.text(_('Error downloading'));
+                size.text(ex.message).attr('title', ex.message);
+                tr.on('click', function() {
+                    // Make the row be gone when clicking it
                     tr.remove();
-                }
+                });
+            }).
+            always(function() {
+                // According to Docker, download was finished.
+                if(!failed)
+                    tr.remove();
             });
 
         $("#containers-search-image-dialog").modal('hide');
@@ -1507,14 +1589,14 @@ PageSearchImage.prototype = {
     perform_search: function(client) {
         var term = $('#containers-search-image-search')[0].value;
 
-        $('#containers-search-image-waiting').addClass('waiting');
+        $('#containers-search-image-waiting').addClass('spinner');
         $('#containers-search-image-no-results').hide();
         $('#containers-search-image-results').hide();
         $('#containers-search-image-results tbody tr').remove();
         this.search_request = client.search(term).
           done(function(data) {
               var resp = data && JSON.parse(data);
-              $('#containers-search-image-waiting').removeClass('waiting');
+              $('#containers-search-image-waiting').removeClass('spinner');
 
               if(resp && resp.length > 0) {
                   $('#containers-search-image-results').show();
@@ -1532,6 +1614,7 @@ PageSearchImage.prototype = {
                           $('#containers-search-tag').val('latest');
                           $('#containers-search-tag').prop('disabled', false);
                           $('#containers-search-download').data('repo', entry.name);
+                          $('#containers-search-download').data('registry', entry.registry_name);
                           $('#containers-search-download').prop('disabled', false);
                       });
                       row.data('entry', entry);
@@ -1720,7 +1803,7 @@ PageContainerDetails.prototype = {
 
     maybe_show_terminal: function(info) {
         if (!this.terminal) {
-            this.terminal = modules.docker.console(this.container_id, info.Config.Tty);
+            this.terminal = docker.console(this.container_id, info.Config.Tty);
             $("#container-terminal").empty().append(this.terminal);
         }
         if (this.terminal.connected)
@@ -1733,6 +1816,28 @@ PageContainerDetails.prototype = {
             this.terminal.connect();
             this.terminal.typeable(true);
         }
+    },
+
+    add_bindings: function(bindings, config) {
+        for (var p in config) {
+            var h = config[p];
+            if (!h)
+                continue;
+            for (var i = 0; i < h.length; i++) {
+                var host_ip = h[i].HostIp;
+                if (host_ip === '')
+                    host_ip = '0.0.0.0';
+                var desc = cockpit.format(_("${hip}:${hport} -> $cport"),
+                                          { hip: host_ip,
+                                           hport: h[i].HostPort,
+                                           cport: p
+                                          });
+                /* make sure we don't push anything we already have */
+                if (bindings.indexOf(desc) === -1)
+                    bindings.push(desc);
+            }
+        }
+        return bindings;
     },
 
     update: function() {
@@ -1755,12 +1860,11 @@ PageContainerDetails.prototype = {
         }
 
         var waiting = !!(this.client.waiting[this.container_id]);
-        $('#container-details div.waiting').toggle(waiting);
+        $('#container-details div.spinner').toggle(waiting);
         $('#container-details button').toggle(!waiting);
         $('#container-details-start').prop('disabled', info.State.Running);
         $('#container-details-stop').prop('disabled', !info.State.Running);
         $('#container-details-restart').prop('disabled', !info.State.Running);
-        $('#container-details-delete').prop('disabled', info.State.Running);
         $('#container-details-commit').prop('disabled', !!info.State.Running);
         $('#container-details-memory-row').toggle(!!info.State.Running);
         $('#container-details-cpu-row').toggle(!!info.State.Running);
@@ -1770,20 +1874,10 @@ PageContainerDetails.prototype = {
         $('#container-details .breadcrumb .active').text(this.name);
 
         var port_bindings = [ ];
-        if (info.NetworkSettings) {
-            for (var p in info.NetworkSettings.Ports) {
-                var h = info.NetworkSettings.Ports[p];
-                if (!h)
-                    continue;
-                for (var i = 0; i < h.length; i++) {
-                    port_bindings.push(cockpit.format(_("${hip}:${hport} -> $cport"),
-                                         { hip: h[i].HostIp,
-                                           hport: h[i].HostPort,
-                                           cport: p
-                                         }));
-                }
-            }
-        }
+        if (info.NetworkSettings)
+            this.add_bindings(port_bindings, info.NetworkSettings.Ports);
+        if (info.HostConfig)
+            this.add_bindings(port_bindings, info.HostConfig.PortBindings);
 
         $('#container-details-id').text(info.ID);
         $('#container-details-names').text(render_container_name(info.Name));
@@ -1819,9 +1913,10 @@ PageContainerDetails.prototype = {
 
     start_container: function () {
         var self = this;
+        var id = this.container_id;
         this.client.start(this.container_id).
                 fail(function(ex) {
-                    shell.show_unexpected_error(ex);
+                    handle_scope_start_container(self.client, id, ex.message, function() { self.maybe_reconnect_terminal(); }, null);
                 }).
                 done(function() {
                     self.maybe_reconnect_terminal();
@@ -1853,13 +1948,7 @@ PageContainerDetails.prototype = {
                         _("Deleting a container will erase all data in it."),
                         _("Delete")).
             done(function () {
-                self.client.rm(self.container_id).
-                    fail(function(ex) {
-                        shell.show_unexpected_error(ex);
-                    }).
-                    done(function() {
-                        location.go("containers");
-                    });
+                docker_container_delete(self.client, self.container_id, function() { location.go("containers"); }, function () { });
             });
     }
 
@@ -2266,18 +2355,19 @@ function DockerClient() {
 
         http.get("/v1.10/info").done(function(data) {
             var info = data && JSON.parse(data);
-            watch = cockpit.channel({ payload: "fsdir1", path: info["DockerRootDir"]});
+            watch = cockpit.channel({ payload: "fslist1", path: info["DockerRootDir"]});
             $(watch).on("message", function(event, data) {
                 trigger_event();
             });
             $(watch).on("close", function(event, options) {
-                if (options.problem)
+                if (options.problem && options.problem != "not-found")
                     console.warn("monitor for docker directory failed: " + options.problem);
             });
 
             $(me).triggerHandler("event");
-        }).fail(function (err) {
-            console.warn("monitor for docker directory failed: " + err);
+        }).fail(function(err) {
+            if (err != "not-found")
+                console.warn("monitor for docker directory failed: " + err);
             $(me).triggerHandler("event");
         });
 
@@ -2310,23 +2400,6 @@ function DockerClient() {
         return null;
     }
 
-    /* Pull an image from the central registry
-     */
-    this.pull = function pull(repo, tag) {
-        docker_debug("pulling: " + repo + ", tag: " + tag);
-
-        var params = { "fromImage": repo };
-        if (tag)
-            params["tag"] = tag;
-
-        return http.request({
-            method: "POST",
-            path: "/v1.10/images/create",
-            params: params,
-            body: ""
-        });
-    };
-
     /* We listen to the resource monitor and include the measurements
      * in the container objects.
      *
@@ -2346,6 +2419,11 @@ function DockerClient() {
             container.CGroup = cgroup;
             var mem = sample[0];
             var limit = sample[1];
+            /* if the limit is extremely high, consider the value to mean unlimited
+             * 1.115e18 is roughly 2^60
+             */
+            if (limit > 1.115e18)
+                limit = undefined;
             var cpu = sample[4];
             var priority = sample[5];
             if (mem != container.MemoryUsage ||
@@ -2502,12 +2580,15 @@ function DockerClient() {
             .then(JSON.parse);
     };
 
-    this.rm = function rm(id) {
+    this.rm = function rm(id, forced) {
+        if (forced === undefined)
+            forced = false;
         waiting(id);
         docker_debug("deleting:", id);
         return http.request({
                 method: "DELETE",
                 path: "/v1.10/containers/" + encodeURIComponent(id),
+                params: { "force": forced },
                 body: ""
             })
             .fail(function(ex) {
@@ -2623,4 +2704,4 @@ function DockerClient() {
     };
 }
 
-})(jQuery, cockpit, shell, modules);
+});

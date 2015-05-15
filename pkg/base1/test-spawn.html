@@ -1,0 +1,334 @@
+<!DOCTYPE html>
+<!--
+  This file is part of Cockpit.
+
+  Copyright (C) 2014 Red Hat, Inc.
+
+  Cockpit is free software; you can redistribute it and/or modify it
+  under the terms of the GNU Lesser General Public License as published by
+  the Free Software Foundation; either version 2.1 of the License, or
+  (at your option) any later version.
+
+  Cockpit is distributed in the hope that it will be useful, but
+  WITHOUT ANY WARRANTY; without even the implied warranty of
+  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+  Lesser General Public License for more details.
+
+  You should have received a copy of the GNU Lesser General Public License
+  along with Cockpit; If not, see <http://www.gnu.org/licenses/>.
+-->
+<html>
+  <head>
+    <title>Spawn Tests</title>
+    <meta charset="utf-8">
+    <link rel="stylesheet" href="../../tools/qunit.css" type="text/css" media="screen" />
+    <script type="text/javascript" src="../../tools/qunit.js"></script>
+
+    <script type="text/javascript" src="cockpit.js"></script>
+  </head>
+  <body>
+    <h1 id="qunit-header">Spawn Tests</h1>
+    <h2 id="qunit-banner"></h2><div id="qunit-testrunner-toolbar"></div>
+    <h2 id="qunit-userAgent"></h2><ol id="qunit-tests"></ol>
+    <div id="qunit-fixture">test markup, will be hidden</div>
+    <div id="done-flag" style="display:none">Done</div>
+  </body>
+<script type="text/javascript">
+
+/* Seems like something jQuery should provide */
+if (!console.assert) {
+    console.assert = function(cond, msg) {
+        if (!cond)
+            throw msg || "assertion failed";
+    }
+};
+
+function MockPeer() {
+    /*
+     * Events triggered here:
+     * open(event, args)
+     * recv(event, payload)
+     * close(event, problem)
+     * get(event, path)
+     */
+
+    /* open: triggered when mock Channel is created */
+    this.onopened = function(event, channel, options) {
+        /* nada */
+    };
+
+    /* close event: triggered when mock Channel is closed */
+    this.onclosed = function(event, channel, options) {
+        /* nada */
+    };
+
+    /* get event: triggered when we receive a get request */
+    this.onget = function(event, channel, request) {
+        if (event.isDefaultPrevented())
+            return false;
+        if (request.path == "/")
+            this.reply(channel, request, { "key": "value" });
+    };
+
+    /* send a message from peer back to channel */
+    this.send = function(channel, payload) {
+        if (typeof(payload) != "string")
+            payload = String(payload);
+        window.setTimeout(function() {
+            if (channel.valid)
+                $(channel).trigger("message", [payload]);
+            else
+                console.log("dropping message after close from MockPeer");
+        }, 5);
+    }
+
+    /* peer closes the channel */
+    this.close = function(channel, options) {
+        console.assert(channel);
+        window.setTimeout(function() {
+            if (channel.valid) {
+                channel.valid = false;
+                $(channel).trigger("close", [options || { }]);
+            }
+        }, 5);
+    }
+
+    var peer = this;
+    var last_channel = 0;
+
+    function MockChannel(options) {
+        this.number = last_channel++;
+        this.options = options;
+        this.valid = true;
+
+        var channel = this;
+
+        this.transport = new function() {
+            this.close = function(problem) { console.assert(arguments.length == 1); }
+        };
+
+        this.send = function(payload) {
+            console.assert(arguments.length == 1);
+            console.assert(this.valid);
+            window.setTimeout(function() { $(peer).trigger("recv", [channel, payload]); }, 5);
+        };
+
+        this.close = function(options) {
+            console.assert(arguments.length <= 1);
+            this.valid = false;
+            window.setTimeout(function() { $(peer).trigger("closed", [channel, options || { }]); }, 5);
+            $(this).triggerHandler("close", [options || { }]);
+        };
+
+        this.buffer = function(callback) {
+            var buffers = [];
+            buffers.callback = callback;
+            buffers.squash = function squash() {
+                return buffers.join("");
+            };
+
+            this.onmessage = function(event, data) {
+                var consumed, block;
+                buffers.push(data);
+                if (buffers.callback) {
+                    block = buffers.squash();
+                    if (block.length > 0) {
+                        consumed = buffers.callback.call(self, block);
+                        if (typeof consumed !== "number" || consumed === block.length) {
+                            buffers.length = 0;
+                        } else {
+                            buffers.length = 1;
+                            buffers[0] = block.substring(consumed);
+                        }
+                    }
+                }
+            };
+
+            return buffers;
+        };
+
+        QUnit.testDone(function() {
+            channel.valid = false;
+        });
+
+        $(peer).trigger("opened", [channel, options]);
+    }
+
+    cockpit.channel = function(options) {
+        return new MockChannel(options);
+    };
+}
+
+test("public api", function() {
+    equal(typeof cockpit.spawn, "function", "spawn is a function");
+});
+
+asyncTest("simple request", function() {
+    expect(5);
+
+    var peer = new MockPeer();
+    $(peer).on("opened", function(event, channel, options) {
+        deepEqual(channel.options["spawn"], ["/the/path", "arg1", "arg2"], "passed spawn correctly");
+        equal(channel.options["host"], undefined, "had no host");
+    });
+    $(peer).on("recv", function(event, channel, payload) {
+        equal(payload, "input", "had input");
+        this.send(channel, "output");
+        this.close(channel);
+    });
+
+    cockpit.spawn(["/the/path", "arg1", "arg2"]).
+        input("input", true).
+        done(function(resp) {
+            deepEqual(resp, "output", "returned right json");
+        })
+        .always(function() {
+            equal(this.state(), "resolved", "didn't fail");
+            start();
+        });
+});
+
+asyncTest("string command", function() {
+    expect(2);
+
+    var peer = new MockPeer();
+    $(peer).on("opened", function(event, channel, options) {
+        deepEqual(channel.options["spawn"], ["/the/path"], "passed spawn correctly");
+        equal(channel.options["host"], "hostname", "had host");
+        start();
+    });
+
+    cockpit.spawn("/the/path", { "host": "hostname" });
+});
+
+asyncTest("channel options", function() {
+    expect(1);
+
+    var peer = new MockPeer();
+    $(peer).on("opened", function(event, channel) {
+        deepEqual(channel.options, {
+            "spawn": ["/the/path", "arg"],
+            "host": "the-other-host.example.com",
+            "extra-option": "zerogjuggs",
+            "payload": "stream"
+            }, "sent correctly");
+        start();
+    });
+
+    /* Don't care about the result ... */
+    var options = { "extra-option": "zerogjuggs", "host": "the-other-host.example.com" };
+    cockpit.spawn(["/the/path", "arg"], options);
+});
+
+asyncTest("streaming", function() {
+    expect(12);
+
+    var peer = new MockPeer();
+    $(peer).on("opened", function(event, channel) {
+        for(var i = 0; i < 10; i++)
+            this.send(channel, String(i));
+        this.close(channel);
+    });
+
+    var at = 0;
+    cockpit.spawn(["/unused"]).
+        stream(function(resp) {
+            equal(String(at), resp, "stream got right data");
+            at++;
+        }).
+        done(function(resp) {
+            ok(!resp, "stream didn't send data to done");
+        }).
+        always(function() {
+            equal(this.state(), "resolved", "split response didn't fail");
+            start();
+        });
+});
+
+asyncTest("with problem", function() {
+    expect(4);
+
+    var peer = new MockPeer();
+    $(peer).on("opened", function(event, channel) {
+        peer.close(channel, {"problem": "not-found"});
+    });
+
+    cockpit.spawn("/unused").
+        fail(function(ex) {
+            equal(ex.problem, "not-found", "got problem");
+            strictEqual(ex.exit_signal, null, "got no signal");
+            ok(isNaN(ex.exit_status), "got no status");
+        }).
+        always(function() {
+            equal(this.state(), "rejected", "should fail");
+            start();
+        });
+});
+
+asyncTest("with status", function() {
+    expect(5);
+
+    var peer = new MockPeer();
+    $(peer).on("opened", function(event, channel) {
+        peer.send(channel, "the data");
+        peer.close(channel, {"exit-status": 5});
+    });
+
+    cockpit.spawn("/unused").
+        fail(function(ex, data) {
+            strictEqual(ex.problem, null, "got null problem");
+            ok(isNaN(ex.exit_signal), "got no signal");
+            strictEqual(ex.exit_status, 5, "got status");
+            equal(data, "the data", "got data even with exit status");
+        }).
+        always(function() {
+            equal(this.state(), "rejected", "should fail");
+            start();
+        });
+});
+
+asyncTest("with signal", function() {
+    expect(5);
+
+    var peer = new MockPeer();
+    $(peer).on("opened", function(event, channel) {
+        peer.send(channel, "signal data here");
+        peer.close(channel, {"exit-signal": "TERM"});
+    });
+
+    cockpit.spawn("/unused").
+        fail(function(ex, data) {
+            strictEqual(ex.problem, null, "got null problem");
+            strictEqual(ex.exit_signal, "TERM", "got signal");
+            ok(isNaN(ex.exit_status), "got no status");
+            equal(data, "signal data here", "got data even with signal");
+        }).
+        always(function() {
+            equal(this.state(), "rejected", "should fail");
+            start();
+        });
+});
+
+test("spawn promise recursive", function() {
+    expect(7);
+
+    var peer = new MockPeer();
+    var promise = cockpit.spawn(["/the/path", "arg1", "arg2"]);
+
+    var target = { };
+    var promise2 = promise.promise(target);
+    strictEqual(promise2, target, "used target");
+    equal(typeof promise2.done, "function", "promise2.done()");
+    equal(typeof promise2.promise, "function", "promise2.promise()");
+    equal(typeof promise2.input, "function", "promise2.input()");
+
+    var promise3 = promise2.promise();
+    equal(typeof promise3.done, "function", "promise3.done()");
+    equal(typeof promise3.promise, "function", "promise3.promise()");
+    equal(typeof promise3.input, "function", "promise3.input()");
+});
+
+QUnit.start();
+
+</script>
+</html>

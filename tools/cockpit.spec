@@ -2,6 +2,8 @@
 #  * gitcommit xxxx
 #  * selinux 1
 
+%define branding default
+
 # Our SELinux policy gets built in tests and f21 and lower
 %if %{defined gitcommit}
 %define extra_flags CFLAGS='-O2 -Wall -Werror -fPIC'
@@ -10,15 +12,23 @@
 %if 0%{?fedora} > 0 && 0%{?fedora} <= 21
 %define selinux 1
 %endif
+%if 0%{?fedora} > 0 && 0%{?fedora} <= 23
+%define branding fedora
+%endif
 %if 0%{?rhel}
 %define selinux 1
 %endif
+%if 0%{?centos}
+%define rhel 0
+%endif
+
+%define _hardened_build 1
 
 Name:           cockpit
 %if %{defined gitcommit}
 Version:        %{gitcommit}
 %else
-Version:        0.41
+Version:        0.56
 %endif
 Release:        1%{?dist}
 Summary:        A user interface for Linux servers
@@ -35,10 +45,8 @@ Source1:        cockpit.pam
 
 BuildRequires: pkgconfig(gio-unix-2.0)
 BuildRequires: pkgconfig(json-glib-1.0)
-BuildRequires: pkgconfig(udisks2) >= 2.1.0
 BuildRequires: pkgconfig(libsystemd-daemon)
 BuildRequires: pkgconfig(polkit-agent-1) >= 0.105
-BuildRequires: pkgconfig(accountsservice) >= 0.6.35
 BuildRequires: pam-devel
 
 BuildRequires: autoconf automake
@@ -52,11 +60,17 @@ BuildRequires: docbook-style-xsl
 BuildRequires: keyutils-libs-devel
 BuildRequires: dbus-devel
 BuildRequires: glib-networking
+BuildRequires: sed
 
 BuildRequires: glib2-devel >= 2.37.4
 BuildRequires: systemd
 BuildRequires: polkit
 BuildRequires: pcp-libs-devel
+
+# For cockpit-lvm
+BuildRequires:  libgudev1-devel
+BuildRequires:  lvm2-devel
+BuildRequires:  polkit-devel
 
 %if %{defined gitcommit}
 BuildRequires: npm
@@ -67,7 +81,7 @@ BuildRequires: nodejs
 %if %{defined selinux}
 BuildRequires: selinux-policy-devel
 BuildRequires: checkpolicy
-BuildRequires: /usr/share/selinux/devel/policyhelp
+BuildRequires: selinux-policy-doc
 BuildRequires: sed
 %endif
 
@@ -75,14 +89,13 @@ BuildRequires: sed
 BuildRequires: xmlto
 
 Requires: %{name}-bridge = %{version}-%{release}
-Requires: %{name}-daemon = %{version}-%{release}
 Requires: %{name}-ws = %{version}-%{release}
 Requires: %{name}-shell = %{version}-%{release}
-%ifarch x86_64
+%ifarch x86_64 armv7hl
 Requires: %{name}-docker = %{version}-%{release}
 %endif
-%if %{defined selinux}
-Requires: %{name}-selinux-policy = %{version}-%{release}
+%if 0%{?rhel}
+Requires: %{name}-subscriptions = %{version}-%{release}
 %endif
 
 %description
@@ -91,23 +104,13 @@ machines.
 
 %package bridge
 Summary: Cockpit bridge server-side component
+Provides: %{name}-daemon
+Obsoletes: %{name}-daemon < 0.48-2
+Requires: polkit
 
 %description bridge
 The Cockpit bridge component installed server side and runs commands on the
 system on behalf of the web based user interface.
-
-%package daemon
-Summary: Deprecated wrappers for various configuration APIs
-Requires: udisks2 >= 2.1.0
-Requires: mdadm
-Requires: lvm2
-Requires: realmd
-Requires: storaged
-
-%description daemon
-Summary: Deprecated wrappers for various configuration APIs such as udisks2
-and accountsservice. Soon these will be accessed directly from the cockpit
-user interface, and this package will disappear.
 
 %package doc
 Summary: Cockpit deployment and developer guide
@@ -129,8 +132,24 @@ Cockpit support for reading PCP metrics and loading PCP archives.
 Summary: Cockpit Shell user interface package
 Requires: %{name}-bridge = %{version}-%{release}
 Requires: NetworkManager
+Requires: shadow-utils
 Requires: grep
-Obsoletes: %{name}-assets
+Requires: libpwquality
+Requires: /usr/bin/date
+Requires: mdadm
+Requires: lvm2
+%if 0%{?rhel} == 0
+Requires: udisks2 >= 2.1.0
+%else
+Provides: %{name}-subscriptions = %{version}-%{release}
+Requires: subscription-manager >= 1.13
+%ifarch x86_64 armv7hl
+Provides: %{name}-docker = %{version}-%{release}
+Requires: docker
+%endif
+%endif
+Provides: %{name}-assets
+Obsoletes: %{name}-assets < 0.32
 BuildArch: noarch
 
 %description shell
@@ -139,7 +158,7 @@ This package contains the Cockpit shell UI assets.
 %package ws
 Summary: Cockpit Web Service
 Requires: glib-networking
-
+Requires: openssl
 Requires: glib2 >= 2.37.4
 Requires(post): systemd
 Requires(preun): systemd
@@ -158,7 +177,7 @@ The Cockpit Web Service listens on the network, and authenticates users.
 %if %{defined gitcommit}
 env NOCONFIGURE=1 ./autogen.sh
 %endif
-%configure --disable-static --disable-silent-rules --with-cockpit-user=cockpit-ws
+%configure --disable-static --disable-silent-rules --with-cockpit-user=cockpit-ws --with-branding=%{branding}
 make -j1 %{?extra_flags} all
 %if %{defined selinux}
 make selinux
@@ -169,7 +188,7 @@ make selinux
 # make check
 
 %install
-%make_install
+make install DESTDIR=%{buildroot} DBGDIR=/debug
 %if %{defined gitcommit}
 make install-test-assets DESTDIR=%{buildroot}
 mkdir -p %{buildroot}/%{_datadir}/polkit-1/rules.d
@@ -185,10 +204,60 @@ install -p -m 644 AUTHORS COPYING README.md %{buildroot}%{_docdir}/%{name}/
 install -d %{buildroot}%{_datadir}/selinux/targeted
 install -p -m 644 cockpit.pp %{buildroot}%{_datadir}/selinux/targeted/
 %endif
-%ifnarch x86_64
+
+# Build the package lists for resource packages
+echo '%dir %{_datadir}/%{name}/base1' > shell.list
+find %{buildroot}%{_datadir}/%{name}/base1 -type f >> shell.list
+
+echo '%dir %{_datadir}/%{name}/dashboard' >> shell.list
+find %{buildroot}%{_datadir}/%{name}/dashboard -type f >> shell.list
+
+echo '%dir %{_datadir}/%{name}/domain' >> shell.list
+find %{buildroot}%{_datadir}/%{name}/domain -type f >> shell.list
+
+echo '%dir %{_datadir}/%{name}/shell' >> shell.list
+find %{buildroot}%{_datadir}/%{name}/shell -type f >> shell.list
+
+echo '%dir %{_datadir}/%{name}/system' >> shell.list
+find %{buildroot}%{_datadir}/%{name}/system -type f >> shell.list
+
+echo '%dir %{_datadir}/%{name}/subscriptions' > subscriptions.list
+find %{buildroot}%{_datadir}/%{name}/subscriptions -type f >> subscriptions.list
+
+%ifarch x86_64 armv7hl
+echo '%dir %{_datadir}/%{name}/docker' > docker.list
+find %{buildroot}%{_datadir}/%{name}/docker -type f >> docker.list
+%else
 rm -rf %{buildroot}/%{_datadir}/%{name}/docker
-rm -rf %{buildroot}/%{_datadir}/%{name}/kubernetes
+touch docker.list
 %endif
+
+%ifarch x86_64
+echo '%dir %{_datadir}/%{name}/kubernetes' > kubernetes.list
+find %{buildroot}%{_datadir}/%{name}/kubernetes -type f >> kubernetes.list
+%else
+rm -rf %{buildroot}/%{_datadir}/%{name}/kubernetes
+touch kubernetes.list
+%endif
+
+sed -i "s|%{buildroot}||" *.list
+
+# Build the package lists for debug package, and move debug files to installed locations
+find %{buildroot}/debug%{_datadir}/%{name} -type f -o -type l > debug.list
+sed -i "s|%{buildroot}/debug||" debug.list
+tar -C %{buildroot}/debug -cf - . | tar -C %{buildroot} -xf -
+rm -rf %{buildroot}/debug
+
+# On RHEL subscriptions and docker are part of the shell package
+%if 0%{?rhel}
+cat subscriptions.list docker.list >> shell.list
+%endif
+
+# Redefine how debug info is built to slip in our extra debug files
+%define __debug_install_post   \
+   %{_rpmconfigdir}/find-debuginfo.sh %{?_missing_build_ids_terminate_build:--strict-build-id} %{?_include_minidebuginfo:-m} %{?_find_debuginfo_dwz_opts} %{?_find_debuginfo_opts} "%{_builddir}/%{?buildsubdir}" \
+   cat debug.list >> %{_builddir}/%{?buildsubdir}/debugfiles.list \
+%{nil}
 
 %files
 %{_docdir}/%{name}/AUTHORS
@@ -203,12 +272,15 @@ rm -rf %{buildroot}/%{_datadir}/%{name}/kubernetes
 %doc %{_mandir}/man1/cockpit-bridge.1.gz
 %{_bindir}/cockpit-bridge
 %attr(4755, -, -) %{_libexecdir}/cockpit-polkit
+%{_libexecdir}/cockpit-wrapper
+%{_libexecdir}/cockpit-lvm
+%{_libexecdir}/cockpit-lvm-helper
 %{_libdir}/security/pam_reauthorize.so
-
-%files daemon
-%doc %{_mandir}/man8/cockpitd.8.gz
 %{_datadir}/dbus-1/services/com.redhat.Cockpit.service
-%{_libexecdir}/cockpitd
+%{_sysconfdir}/dbus-1/system.d/com.redhat.Cockpit.LVM.conf
+%{_datadir}/dbus-1/system-services/com.redhat.Cockpit.LVM.service
+%{_datadir}/polkit-1/actions/com.redhat.Cockpit.LVM.policy
+%{_datadir}/cockpit/lvm-nolocking/lvm.conf
 
 %files doc
 %exclude %{_docdir}/%{name}/AUTHORS
@@ -218,20 +290,22 @@ rm -rf %{buildroot}/%{_datadir}/%{name}/kubernetes
 
 %files pcp
 %{_libexecdir}/cockpit-pcp
+/var/lib/pcp/config/pmlogconf/tools/cockpit
 
 %post pcp
 # HACK - https://bugzilla.redhat.com/show_bug.cgi?id=1185749
 ( cd /var/lib/pcp/pmns && ./Rebuild -du )
+# HACK - https://bugzilla.redhat.com/show_bug.cgi?id=1185764
+# We can't use "systemctl reload-or-try-restart" since systemctl might
+# be out of sync with reality.
+/usr/share/pcp/lib/pmlogger reload
 
-%files shell
-%{_datadir}/%{name}/base1
-%{_datadir}/%{name}/legacy
-%{_datadir}/%{name}/shell
-%{_datadir}/%{name}/system
+%files shell -f shell.list
 
 %files ws
 %doc %{_mandir}/man5/cockpit.conf.5.gz
 %doc %{_mandir}/man8/cockpit-ws.8.gz
+%doc %{_mandir}/man8/remotectl.8.gz
 %config(noreplace) %{_sysconfdir}/%{name}
 %config(noreplace) %{_sysconfdir}/pam.d/cockpit
 %{_unitdir}/cockpit.service
@@ -260,7 +334,20 @@ test -f %{_bindir}/firewall-cmd && firewall-cmd --reload --quiet || true
 
 # Conditionally built packages below
 
-%ifarch x86_64
+%if 0%{?rhel} == 0
+
+%package subscriptions
+Summary: Cockpit subscription user interface package
+Requires: subscription-manager >= 1.13
+BuildArch: noarch
+
+%description subscriptions
+This package contains the Cockpit user interface integration with local
+subscription management.
+
+%files subscriptions -f subscriptions.list
+
+%ifarch x86_64 armv7hl
 
 %package docker
 Summary: Cockpit user interface for Docker containers
@@ -270,8 +357,13 @@ Requires: docker
 The Cockpit components for interacting with Docker and user interface.
 This package is not yet complete.
 
-%files docker
-%{_datadir}/%{name}/docker
+%files docker -f docker.list
+
+%endif
+
+%endif
+
+%ifarch x86_64
 
 %package kubernetes
 Summary: Cockpit user interface for Kubernetes cluster
@@ -281,8 +373,7 @@ Requires: kubernetes
 The Cockpit components for visualizing and configuring a Kubernetes
 cluster. Installed on the Kubernetes master. This package is not yet complete.
 
-%files kubernetes
-%{_datadir}/%{name}/kubernetes
+%files kubernetes -f kubernetes.list
 
 %endif
 
@@ -300,10 +391,10 @@ pulls in some necessary packages via dependencies.
 %{_datadir}/%{name}/playground
 %{_datadir}/cockpit-test-assets
 %{_datadir}/polkit-1/rules.d
-/usr/lib/systemd/system/cockpit-testing.service
-/usr/lib/systemd/system/cockpit-testing.socket
-/usr/lib/systemd/system/test-server.service
-/usr/lib/systemd/system/test-server.socket
+%{_unitdir}/cockpit-testing.service
+%{_unitdir}/cockpit-testing.socket
+%{_unitdir}/test-server.service
+%{_unitdir}/test-server.socket
 
 %endif
 
@@ -326,10 +417,10 @@ SELinux policy for Cockpit testing.
 %{_datadir}/selinux/targeted/cockpit.pp
 
 %post selinux-policy
-/usr/sbin/semodule -s targeted -i %{_datadir}/selinux/targeted/cockpit.pp &> /dev/null || :
+/usr/sbin/semodule -s targeted -i %{_datadir}/selinux/targeted/cockpit.pp
 /sbin/fixfiles -R cockpit restore || :
 /sbin/fixfiles -R cockpit-test-assets restore || :
-/sbin/restorecon -R %{_sharedstatedir}/%{name} || :
+/sbin/restorecon -R %{_sharedstatedir}/%{name}
 
 %postun selinux-policy
 if [ $1 -eq 0 ] ; then
@@ -342,6 +433,54 @@ fi
 %endif
 
 %changelog
+* Tue Apr 07 2015 Stef Walter <stefw@redhat.com> - 0.50-1
+- Update to 0.50 release
+
+* Wed Apr 01 2015 Stephen Gallagher <sgallagh@redhat.com> 0.49-2
+- Fix incorrect Obsoletes: of cockpit-daemon
+
+* Wed Apr 01 2015 Peter <petervo@redhat.com> - 0.49-1
+- Update to 0.49 release.
+- cockpitd was renamed to cockpit-wrapper the cockpit-daemon
+  package was removed and is now installed with the
+  cockpit-bridge package.
+
+* Mon Mar 30 2015 Peter <petervo@redhat.com> - 0.48-1
+- Update to 0.48 release
+
+* Mon Mar 30 2015 Stephen Gallagher <sgallagh@redhat.com> 0.47-2
+- Don't attempt to build cockpit-kubernetes on armv7hl
+
+* Fri Mar 27 2015 Peter <petervo@redhat.com> - 0.47-1
+- Update to 0.47 release, build docker on armvrhl
+
+* Thu Mar 26 2015 Stef Walter <stefw@redhat.com> - 0.46-1
+- Update to 0.46 release
+
+* Mon Mar 23 2015 Stef Walter <stefw@redhat.com> - 0.45-1
+- Update to 0.45 release
+
+* Sat Mar 21 2015 Stef Walter <stefw@redhat.com> - 0.44-3
+- Add back debuginfo files to the right place
+
+* Fri Mar 20 2015 Stef Walter <stefw@redhat.com> - 0.44-2
+- Disable separate debuginfo for now: build failure
+
+* Fri Mar 20 2015 Stef Walter <stefw@redhat.com> - 0.44-1
+- Update to 0.44 release
+
+* Thu Mar 19 2015 Stef Walter <stefw@redhat.com> - 0.43-2
+- Don't break EPEL or CentOS builds due to missing branding
+
+* Wed Mar 18 2015 Stef Walter <stefw@redhat.com> - 0.43-1
+- Update to 0.43 release
+
+* Tue Mar 17 2015 Stef Walter <stefw@redhat.com> - 0.42-2
+- Fix obseleting cockpit-assets
+
+* Sat Mar 14 2015 Stef Walter <stefw@redhat.com> - 0.42-1
+- Update to 0.42 release
+
 * Wed Mar 04 2015 Stef Walter <stefw@redhat.com> - 0.41-1
 - Update to 0.41 release
 

@@ -17,15 +17,18 @@
  * along with Cockpit; If not, see <http://www.gnu.org/licenses/>.
  */
 
-/* global jQuery   */
-/* global cockpit  */
-/* global _        */
-/* global C_       */
+define([
+    "jquery",
+    "base1/cockpit",
+    "shell/controls",
+    "shell/shell",
+    "system/server",
+    "shell/cockpit-main"
+], function($, cockpit, controls, shell, server) {
+"use strict";
 
-var shell = shell || { };
-var modules = modules || { };
-
-(function($, cockpit, shell, modules) {
+var _ = cockpit.gettext;
+var C_ = cockpit.gettext;
 
 function nm_debug() {
     if (window.debugging == "all" || window.debugging == "nm")
@@ -174,7 +177,7 @@ function NetworkManagerModel() {
     function get_object(path, type) {
         if (path == "/")
             return null;
-        function constructor() {
+        function Constructor() {
             this[' priv'] = { };
             priv(this).type = type;
             priv(this).path = path;
@@ -182,8 +185,8 @@ function NetworkManagerModel() {
                 this[p] = type.props[p].def;
         }
         if (!objects[path]) {
-            constructor.prototype = type.prototype;
-            objects[path] = new constructor();
+            Constructor.prototype = type.prototype;
+            objects[path] = new Constructor();
             if (type.refresh)
                 type.refresh(objects[path]);
             if (type.exporters && type.exporters[0])
@@ -744,7 +747,7 @@ function NetworkManagerModel() {
     }
 
     function refresh_udev(obj) {
-        if (!obj.Udi.startsWith("/sys/"))
+        if (obj.Udi.indexOf("/sys/") !== 0)
             return;
 
         push_refresh();
@@ -753,7 +756,7 @@ function NetworkManagerModel() {
                 var props = { };
                 function snarf_prop(line, env, prop) {
                     var prefix = "E: " + env + "=";
-                    if (line.startsWith(prefix)) {
+                    if (line.indexOf(prefix) === 0) {
                         props[prop] = line.substr(prefix.length);
                     }
                 }
@@ -1209,10 +1212,10 @@ function render_active_connection(dev, with_link, hide_link_local) {
     }
 
     function is_ipv6_link_local(addr) {
-        return (addr.startsWith("fe8") ||
-                addr.startsWith("fe9") ||
-                addr.startsWith("fea") ||
-                addr.startsWith("feb"));
+        return (addr.indexOf("fe8") === 0 ||
+                addr.indexOf("fe9") === 0 ||
+                addr.indexOf("fea") === 0 ||
+                addr.indexOf("feb") === 0);
     }
 
     if (con && con.Ip6Config) {
@@ -1235,7 +1238,7 @@ function network_plot_setup_hook(plot) {
 }
 
 function update_network_privileged() {
-    shell.update_privileged_ui(
+    controls.update_privileged_ui(
         shell.default_permission, ".network-privileged",
         cockpit.format(
             _("The user <b>$0</b> is not permitted to modify network settings"),
@@ -1319,8 +1322,8 @@ PageNetworking.prototype = {
         });
         $(this.tx_plot).on('highlight', highlight_netdev_row);
 
-        this.log_box = modules.server.logbox([ "_SYSTEMD_UNIT=NetworkManager.service",
-                                               "_SYSTEMD_UNIT=firewalld.service" ], 10);
+        this.log_box = server.logbox([ "_SYSTEMD_UNIT=NetworkManager.service",
+                                       "_SYSTEMD_UNIT=firewalld.service" ], 10);
         $('#networking-log').empty().append(this.log_box);
 
         $(this.model).on('changed.networking', $.proxy(this, "update_devices"));
@@ -1568,7 +1571,7 @@ PageNetworkInterface.prototype = {
         var self = this;
         $('#network-interface-delete').click($.proxy(this, "delete_connections"));
         $('#network-interface-delete').parent().append(
-            this.device_onoff = shell.OnOff(false,
+            this.device_onoff = controls.OnOff(false,
                                             $.proxy(this, "connect"),
                                             $.proxy(this, "disconnect"),
                                             null,
@@ -2134,7 +2137,7 @@ PageNetworkInterface.prototype = {
                                     [ $('<td>').text(""), $('<td>').text("") ] :
                                     $('<td colspan="2">').text(device_state_text(dev))),
                                    $('<td style="text-align:right">').append(
-                                       shell.OnOff(is_active,
+                                       controls.OnOff(is_active,
                                                      function () {
                                                          slave_con.activate(iface.Device).
                                                              fail(shell.show_unexpected_error);
@@ -2259,7 +2262,7 @@ PageNetworkIpSettings.prototype = {
             var onoff;
             var btn = $('<span>').append(
                 $('<span style="margin-right:10px">').text(title),
-                onoff = shell.OnOff(!params[p], function (val) {
+                onoff = controls.OnOff(!params[p], function (val) {
                     params[p] = !val;
                     self.update();
                 }));
@@ -2459,8 +2462,31 @@ function is_interesting_interface(iface) {
             iface.Device.DeviceType == 'bridge');
 }
 
+function array_find(array, predicate) {
+    if (array === null || array === undefined) {
+        throw new TypeError('Array.prototype.find called on null or undefined');
+    }
+    if (typeof predicate !== 'function') {
+        throw new TypeError('predicate must be a function');
+    }
+    var list = Object(array);
+    var length = list.length >>> 0;
+    var thisArg = arguments[1];
+    var value;
+
+    for (var i = 0; i < length; i++) {
+        if (i in list) {
+            value = list[i];
+            if (predicate.call(thisArg, value, i, list)) {
+                return value;
+            }
+        }
+    }
+    return undefined;
+}
+
 function slave_connection_for_interface(master, iface) {
-    return master && master.Slaves.find(function (s) {
+    return master && array_find(master.Slaves, function (s) {
         return is_interface_connection(iface, s);
     });
 }
@@ -2618,7 +2644,7 @@ PageNetworkBondSettings.prototype = {
         if (!PageNetworkBondSettings.connection)
             return null;
 
-        return PageNetworkBondSettings.connection.Slaves.find(function (s) {
+        return array_find(PageNetworkBondSettings.connection.Slaves, function (s) {
             return s.Interfaces.indexOf(iface) >= 0;
         }) || null;
     },
@@ -2674,10 +2700,11 @@ PageNetworkBondSettings.prototype = {
             }
         }
 
+        /* TODO: Migrate away from jQuery spaghetti */
         var body =
             $('<table class="cockpit-form-table">').append(
                 $('<tr>').append(
-                    $('<td>').text(_("Name")),
+                    $('<td>').append($('<label class="control-label">').text(_("Name"))),
                     $('<td>').append(
                         $('<input class="form-control">').
                             val(settings.bond.interface_name).
@@ -2687,43 +2714,43 @@ PageNetworkBondSettings.prototype = {
                                 settings.connection.interface_name = val;
                             }))),
                 $('<tr>').append(
-                    $('<td class="top">').text(_("Members")),
+                    $('<td class="top">').append($('<label class="control-label">').text(_("Members"))),
                     $('<td>').append(
                         slaves_element = render_slave_interface_choices(model, master).
                             change(change_slaves))).
                     toggle(!master),
                 $('<tr>').append(
-                    $('<td>').text(_("Mode")),
+                    $('<td>').append($('<label class="control-label">').text(_("Mode"))),
                     $('<td>').append(
                         mode_btn = shell.select_btn(change_mode, bond_mode_choices))),
                 $('<tr>').append(
-                    $('<td>').text(_("Primary")),
+                    $('<td>').append($('<label class="control-label">').text(_("Primary"))),
                     $('<td>').append(
                         primary_btn = slave_chooser_btn(change_mode, slaves_element))),
                 $('<tr>').append(
-                    $('<td>').text(_("Link Monitoring")),
+                    $('<td>').append($('<label class="control-label">').text(_("Link Monitoring"))),
                     $('<td>').append(
                         monitoring_btn = shell.select_btn(change_monitoring, bond_monitoring_choices))),
                 $('<tr>').append(
-                    $('<td>').text(_("Monitoring Interval")),
+                    $('<td>').append($('<label class="control-label">').text(_("Monitoring Interval"))),
                     $('<td>').append(
                         interval_input = $('<input class="form-control network-number-field" type="text" maxlength="4">').
                             val(options.miimon || options.arp_interval || "100").
                             change(change_monitoring))),
                 $('<tr>').append(
-                    $('<td>').text(_("Monitoring Targets")),
+                    $('<td>').append($('<label class="control-label">').text(_("Monitoring Targets"))),
                     $('<td>').append(
                         targets_input = $('<input class="form-control">').
                             val(options.arp_ip_targets).
                             change(change_monitoring))),
                 $('<tr>').append(
-                    $('<td>').text(_("Link up delay")),
+                    $('<td>').append($('<label class="control-label">').text(_("Link up delay"))),
                     $('<td>').append(
                         updelay_input = $('<input class="form-control network-number-field" type="text" maxlength="4">').
                             val(options.updelay || "0").
                             change(change_monitoring))),
                 $('<tr>').append(
-                    $('<td>').text(_("Link down delay")),
+                    $('<td>').append($('<label class="control-label">').text(_("Link down delay"))),
                     $('<td>').append(
                         downdelay_input = $('<input class="form-control network-number-field" type="text" maxlength="4">').
                             val(options.downdelay || "0").
@@ -2795,7 +2822,7 @@ PageNetworkBridgeSettings.prototype = {
         if (!PageNetworkBridgeSettings.connection)
             return null;
 
-        return PageNetworkBridgeSettings.connection.Slaves.find(function (s) {
+        return array_find(PageNetworkBridgeSettings.connection.Slaves, function (s) {
             return s.Interfaces.indexOf(iface) >= 0;
         }) || null;
     },
@@ -2822,10 +2849,11 @@ PageNetworkBridgeSettings.prototype = {
             max_age_input.parents("tr").toggle(options.stp);
         }
 
+        /* TODO: Migrate away from jQuery spaghetti */
         var body =
             $('<table class="cockpit-form-table">').append(
                 $('<tr>').append(
-                    $('<td>').text(_("Name")),
+                    $('<td>').append($('<label class="control-label">').text(_("Name"))),
                     $('<td>').append(
                         $('<input class="form-control">').
                             val(options.interface_name).
@@ -2835,36 +2863,36 @@ PageNetworkBridgeSettings.prototype = {
                                 settings.connection.interface_name = val;
                             }))),
                 $('<tr>').append(
-                    $('<td class="top">').text(_("Ports")),
+                    $('<td class="top">').append($('<label class="control-label">').text(_("Ports"))),
                     $('<td>').append(render_slave_interface_choices(model,
                                                                     PageNetworkBridgeSettings.connection))).
                     toggle(!PageNetworkBridgeSettings.connection),
                 $('<tr>').append(
-                    $('<td>').text(_("Spanning Tree Protocol (STP)")),
+                    $('<td>').append($('<label class="control-label">').text(_("Spanning Tree Protocol (STP)"))),
                     $('<td>').append(
                         stp_input = $('<input type="checkbox">').
                             prop('checked', options.stp).
                             change(change_stp))),
                 $('<tr>').append(
-                    $('<td>').text(_("STP Priority")),
+                    $('<td>').append($('<label class="control-label">').text(_("STP Priority"))),
                     $('<td>').append(
                         priority_input = $('<input class="form-control" type="text">').
                             val(options.priority).
                             change(change_stp))),
                 $('<tr>').append(
-                    $('<td>').text(_("STP Forward delay")),
+                    $('<td>').append($('<label class="control-label">').text(_("STP Forward delay"))),
                     $('<td>').append(
                         forward_delay_input = $('<input class="form-control" type="text">').
                             val(options.forward_delay).
                             change(change_stp))),
                 $('<tr>').append(
-                    $('<td>').text(_("STP Hello time")),
+                    $('<td>').append($('<label class="control-label">').text(_("STP Hello time"))),
                     $('<td>').append(
                         hello_time_input = $('<input class="form-control" type="text">').
                             val(options.hello_time).
                             change(change_stp))),
                 $('<tr>').append(
-                    $('<td>').text(_("STP Maximum message age")),
+                    $('<td>').append($('<label class="control-label">').text(_("STP Maximum message age"))),
                     $('<td>').append(
                         max_age_input = $('<input class="form-control" type="text">').
                             val(options.max_age).
@@ -2942,22 +2970,23 @@ PageNetworkBridgePortSettings.prototype = {
             options.hairpin_mode = hairpin_mode_input.prop('checked');
         }
 
+        /* TODO: Migrate away from jQuery spaghetti code */
         var body =
             $('<table class="cockpit-form-table">').append(
                 $('<tr>').append(
-                    $('<td>').text(_("Priority")),
+                    $('<td>').append($('<label class="control-label">').text(_("Priority"))),
                     $('<td>').append(
                         priority_input = $('<input class="form-control network-number-field" type="text">').
                             val(options.priority).
                             change(change))),
                 $('<tr>').append(
-                    $('<td>').text(_("Path cost")),
+                    $('<td>').append($('<label class="control-label">').text(_("Path cost"))),
                     $('<td>').append(
                         path_cost_input = $('<input class="form-control network-number-field" type="text">').
                             val(options.path_cost).
                             change(change))),
                 $('<tr>').append(
-                    $('<td>').text(_("Hair Pin mode")),
+                    $('<td>').append($('<label class="control-label">').text(_("Hair Pin mode"))),
                     $('<td>').append(
                         hairpin_mode_input = $('<input type="checkbox">').
                             prop('checked', options.hairpin_mode).
@@ -3042,6 +3071,8 @@ PageNetworkVlanSettings.prototype = {
         function change() {
             // XXX - parse errors
             options.parent = shell.select_btn_selected(parent_btn);
+            $("#network-vlan-settings-apply").toggleClass("disabled", !options.parent);
+
             options.id = parseInt(id_input.val(), 10);
 
             if (auto_update_name && options.parent && options.id)
@@ -3063,21 +3094,22 @@ PageNetworkVlanSettings.prototype = {
                 parent_choices.push({ title: i.Name, choice: i.Name });
         });
 
+        /* TODO: Migrate away from jQuery spaghetti */
         var body =
             $('<table class="cockpit-form-table">').append(
                 $('<tr>').append(
-                    $('<td>').text(_("Parent")),
+                    $('<td>').append($('<label class="control-label">').text(_("Parent"))),
                     $('<td>').append(
                         parent_btn = shell.select_btn(change, parent_choices))),
                 $('<tr>').append(
-                    $('<td>').text(_("VLAN Id")),
+                    $('<td>').append($('<label class="control-label">').text(_("VLAN Id"))),
                     $('<td>').append(
                         id_input = $('<input class="form-control" type="text">').
                             val(options.id || "1").
                             change(change).
                             on('input', change))),
                 $('<tr>').append(
-                    $('<td>').text(_("Name")),
+                    $('<td>').append($('<label class="control-label">').text(_("Name"))),
                     $('<td>').append(
                         name_input = $('<input class="form-control" type="text">').
                             val(options.interface_name).
@@ -3132,4 +3164,4 @@ function PageNetworkVlanSettings() {
 
 shell.dialogs.push(new PageNetworkVlanSettings());
 
-})(jQuery, cockpit, shell, modules);
+});

@@ -1,17 +1,37 @@
 <!DOCTYPE html>
+<!--
+This file is part of Cockpit.
+
+Copyright (C) 2015 Red Hat, Inc.
+
+Cockpit is free software; you can redistribute it and/or modify it
+under the terms of the GNU Lesser General Public License as published by
+the Free Software Foundation; either version 2.1 of the License, or
+(at your option) any later version.
+
+Cockpit is distributed in the hope that it will be useful, but
+WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+Lesser General Public License for more details.
+
+You should have received a copy of the GNU Lesser General Public License
+along with Cockpit; If not, see <http://www.gnu.org/licenses/>.
+-->
+<!DOCTYPE html>
 <html>
 <head>
     <title translatable="yes">Kubernetes Master</title>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <link href="../legacy/cockpit.css" type="text/css" rel="stylesheet">
-    <script src="../base1/cockpit.js"></script>
+    <link href="../base1/cockpit.css" type="text/css" rel="stylesheet">
+    <script src="../base1/bundle.js"></script>
+    <script src="../kubernetes/kubernetes.js"></script>
 <script>
 require([
     "jquery",
     "base1/cockpit",
     "base1/mustache",
-    "kubernetes/kubernetes"
+    "kubernetes/client"
 ], function($, cockpit, Mustache, kubernetes) {
     var client = kubernetes.k8client();
     var etcdclient = kubernetes.etcdclient();
@@ -87,7 +107,7 @@ require([
         return render;
     }
 
-    renderer = view_renderer();
+    var renderer = view_renderer();
     $(client).on("pods nodes", renderer);
     renderer();
 
@@ -102,7 +122,7 @@ require([
     }
 
     function lookup_rc(id) {
-        var pod, i, length = client.replicationcontrollers.length;
+        var rc, pod, i, length = client.replicationcontrollers.length;
         for (i = 0; i < length; i++) {
             rc = client.replicationcontrollers[i];
             if (id == rc.metadata.name)
@@ -167,13 +187,13 @@ require([
                 return;
             }
             if (entityType == "pod") {
-                client.create_pod(jsondata);
+                client.create(jsondata);
             } else if (entityType == "node") {
-                client.create_nodes(jsondata);
+                client.create(jsondata);
             } else if (entityType == "replicationcontroller") {
-                client.create_replicationcontroller(jsondata);
+                client.create(jsondata);
             } else if (entityType == "service") {
-               client.create_service(jsondata);
+               client.create(jsondata);
             }
             $("#add-dialog").modal('hide');
             $("#add-dialog-apply").off('click');
@@ -262,7 +282,7 @@ require([
 
         /* jshint validthis:true */
         var context = { };
-        var text = Mustache.render(template, $.extend(context, rc));
+        var text = Mustache.render(template, $.extend(context, entity));
         $(this).find(".modal-body").html(text);
         $("#update-dialog-apply").off('click');
         $("#update-dialog-apply").on('click', function () {

@@ -17,15 +17,18 @@
  * along with Cockpit; If not, see <http://www.gnu.org/licenses/>.
  */
 
-/* global jQuery   */
-/* global cockpit  */
-/* global _        */
-/* global C_       */
+define([
+    "jquery",
+    "base1/cockpit",
+    "shell/controls",
+    "shell/shell",
+    "system/server",
+    "shell/cockpit-main"
+], function($, cockpit, controls, shell, server) {
+"use strict";
 
-var shell = shell || { };
-var modules = modules || { };
-
-(function($, cockpit, shell, modules) {
+var _ = cockpit.gettext;
+var C_ = cockpit.gettext;
 
 function fmt_size(bytes)
 {
@@ -50,6 +53,16 @@ function format_temperature(kelvin) {
 // http://www.w3.org/TR/html5/global-attributes.html#the-id-attribute
 function esc_id_attr(str) {
     return shell.esc(str).replace(/ /g, "&#20;").replace(/\x09/g, "&#09;").replace(/\x0a/g, "&#0a;").replace(/\x0c/g, "&#0c;").replace(/\x0d/g, "&#0d;");
+}
+
+var _hostnamed = null;
+function hostnamed() {
+    var client;
+    if (!_hostnamed) {
+        client = cockpit.dbus("org.freedesktop.hostname1");
+        _hostnamed = client.proxy();
+    }
+    return _hostnamed;
 }
 
 var active_targets = [ ];
@@ -285,10 +298,10 @@ function storage_job_box(client, elt)
 }
 
 function storage_log_box(elt) {
-    var logbox = modules.server.logbox([ "_SYSTEMD_UNIT=udisks2.service", "+",
-                                         "_SYSTEMD_UNIT=dm-event.service", "+",
-                                         "_SYSTEMD_UNIT=smartd.service", "+",
-                                         "COCKPIT_DOMAIN=storage" ], 10);
+    var logbox = server.logbox([ "_SYSTEMD_UNIT=udisks2.service", "+",
+                                 "_SYSTEMD_UNIT=dm-event.service", "+",
+                                 "_SYSTEMD_UNIT=smartd.service", "+",
+                                 "COCKPIT_DOMAIN=storage" ], 10);
     elt.empty().append(logbox);
     return logbox;
 }
@@ -322,7 +335,7 @@ function format_fsys_usage(used, total) {
 }
 
 function update_storage_privileged() {
-    shell.update_privileged_ui(
+    controls.update_privileged_ui(
         shell.default_permission, ".storage-privileged",
         cockpit.format(
             _("The user <b>$0</b> is not permitted to manage storage"),
@@ -448,6 +461,20 @@ PageStorage.prototype = {
         this.mount_monitor = this.client.get("/com/redhat/Cockpit/MountMonitor",
                                              "com.redhat.Cockpit.MultiResourceMonitor");
         $(this.mount_monitor).on('NewSample.storage', render_mount_samples);
+
+        function update_requirements() {
+            var manager = self.client.lookup("/com/redhat/Cockpit/Storage/Manager",
+                                             "com.redhat.Cockpit.Storage.Manager");
+
+            if (!manager || !manager.HaveUDisks || !manager.HaveStoraged) {
+                $('#storage').children().hide();
+                $("#storage-not-supported").show();
+            }
+        }
+        if (this.client.state == "ready")
+            update_requirements();
+        else
+            $(this.client).on("state-change", update_requirements);
     },
 
     show: function() {
@@ -529,7 +556,7 @@ PageStorage.prototype = {
             return "";
 
         var blockdev = block.Device;
-        if (blockdev.startsWith("/dev/"))
+        if (blockdev.indexOf("/dev/") === 0)
             blockdev = blockdev.substr(5);
         this.blockdevs[blockdev] = true;
         return blockdev;
@@ -597,7 +624,7 @@ PageStorage.prototype = {
                         $('<span class="writing">').text(""))),
                 $('<td style="width:28px">').append(
                     $('<div>', { id: "storage-spinner-" + id,
-                                 "class": "waiting"
+                                 "class": "spinner"
                                })));
 
         // TODO: should show warning icon etc. if disk is failing
@@ -646,7 +673,7 @@ PageStorage.prototype = {
                     $('<span class="col-xs-9 col-xs-pull-3">').text(raid_get_desc(raid))),
                 $('<td style="width:28px">').append(
                     $('<div>', { id: "storage-spinner-" + id,
-                                 "class": "waiting"
+                                 "class": "spinner"
                                })));
 
         // Insert sorted
@@ -691,7 +718,7 @@ PageStorage.prototype = {
                     $('<span class="col-xs-9 col-xs-pull-3">').text(vg.Name)),
                 $('<td style="width:28px">').append(
                     $('<div>', { id: "storage-spinner-" + id,
-                                 "class": "waiting"
+                                 "class": "spinner"
                                })));
 
         // Insert sorted
@@ -751,7 +778,7 @@ PageStorage.prototype = {
                     $('<span class="writing">').text("")),
                 $('<td style="width:28px">').append(
                     $('<div>', { id: "storage-spinner-" + id,
-                                 "class": "waiting"
+                                 "class": "spinner"
                                })));
 
         // Insert sorted
@@ -788,7 +815,7 @@ PageStorage.prototype = {
         var text = $('<td style="text-align:right">');
 
         if (block.MountedAt && block.MountedAt.length > 0) {
-            bar_row = shell.BarRow();
+            bar_row = controls.BarRow();
             for (var i = 0; i < block.MountedAt.length; i++) {
                 this.mount_bar_rows[block.MountedAt[i]] = bar_row;
                 this.mount_texts[block.MountedAt[i]] = text;
@@ -986,8 +1013,7 @@ function block_go(block)
     }
 }
 
-function block_get_link_desc(block)
-{
+function block_get_link_desc(block) {
     var is_part = false;
     var is_crypt = false;
     var link = null;
@@ -1086,13 +1112,10 @@ function raid_get_desc(raid)
     if (parts.length != 2)
         return raid.Name;
 
-    var manager = raid._client.lookup("/com/redhat/Cockpit/Manager",
-                                      "com.redhat.Cockpit.Manager");
-
-    if (manager && parts[0] == manager.StaticHostname)
+    if (parts[0] == hostnamed().StaticHostname)
         return parts[1];
     else
-        return cockpit.format(_("$name (on $host)"),
+        return cockpit.format(_("$name (from $host)"),
                  { name: parts[1],
                    host: parts[0]
                  });
@@ -1225,7 +1248,7 @@ PageStorageDetail.prototype = {
             });
         }
 
-        this.bitmap_onoff = shell.OnOff(false,
+        this.bitmap_onoff = controls.OnOff(false,
                                           change_bitmap,
                                           undefined,
                                           null, "storage-privileged");
@@ -1474,7 +1497,7 @@ PageStorageDetail.prototype = {
             tr.append(
                 $('<td>', { 'style': 'float:right' }).append(
                     $('<div>', { 'id': 'entry-spinner-' +id,
-                                 'class': 'waiting'
+                                 'class': 'spinner'
                                })));
             list.append(
                 $('<li>', { 'class': 'list-group-item' }).append(
@@ -1897,6 +1920,9 @@ PageStorageDetail.prototype = {
             block = this.client.lookup (info[i][0], "com.redhat.Cockpit.Storage.Block");
             states = info[i][2];
             num_errors = info[i][3];
+
+            if (!block)
+                continue;
 
             state_html = "";
             for (j = 0; j < states.length; j++) {
@@ -3218,9 +3244,10 @@ PageRenameGroup.prototype = {
                                    name,
                                    function (error) {
                                        $("#storage_rename_group_dialog").modal('hide');
-                                       cockpit.location = "storage";
                                        if (error)
                                            shell.show_unexpected_error(error);
+                                       else
+                                           cockpit.location.go("storage-detail", { type: "vg", id: name });
                                    });
     }
 
@@ -3436,6 +3463,7 @@ PageVGDiskAdd.prototype = {
 
     setup: function() {
         $("#vg-disk-add-add").on('click', $.proxy(this, "add"));
+        $("#vg-disks-not-found .close").on('click', function() { $('#vg-disks-not-found').toggleClass('hide', true); });
     },
 
     enter: function() {
@@ -3447,6 +3475,11 @@ PageVGDiskAdd.prototype = {
 
         this.blocks = fill_free_devices_list(PageVGDiskAdd.volume_group._client,
                                              'vg-disk-add-drives', is_ours);
+        var show = this.blocks.length > 0;
+        var msg = show ? "" : _("No available disks");
+        $("#vg-disks-not-found span.alert-message").text(msg);
+        $("#vg-disks-not-found").toggleClass('hide', show);
+
         $('#vg-disk-add-drives input').on('change', $.proxy(this, "update"));
         this.update();
     },
@@ -3485,4 +3518,4 @@ function PageVGDiskAdd() {
 
 shell.dialogs.push(new PageVGDiskAdd());
 
-})(jQuery, cockpit, shell, modules);
+});

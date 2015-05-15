@@ -30,6 +30,7 @@
 #include "cockpithandlers.h"
 
 #include "common/cockpitcertificate.h"
+#include "common/cockpitconf.h"
 #include "common/cockpitlog.h"
 #include "common/cockpitmemory.h"
 
@@ -41,15 +42,25 @@
 static gint      opt_port         = 9090;
 static gboolean  opt_no_tls       = FALSE;
 static gboolean  opt_local_ssh    = FALSE;
+static gboolean  opt_version      = FALSE;
 
 static GOptionEntry cmd_entries[] = {
   {"port", 'p', 0, G_OPTION_ARG_INT, &opt_port, "Local port to bind to (9090 if unset)", NULL},
   {"no-tls", 0, 0, G_OPTION_ARG_NONE, &opt_no_tls, "Don't use TLS", NULL},
   {"local-ssh", 0, 0, G_OPTION_ARG_NONE, &opt_local_ssh, "Log in locally via SSH", NULL },
+  {"version", 0, 0, G_OPTION_ARG_NONE, &opt_version, "Print version information", NULL },
   {NULL}
 };
 
 /* ---------------------------------------------------------------------------------------------------- */
+
+static void
+print_version (void)
+{
+  g_print ("Version: %s\n", PACKAGE_VERSION);
+  g_print ("Protocol: 1\n");
+  g_print ("Authorization: crypt1\n");
+}
 
 int
 main (int argc,
@@ -91,7 +102,14 @@ main (int argc,
       goto out;
     }
 
-  cockpit_set_journal_logging (!isatty (2));
+  if (opt_version)
+    {
+      print_version ();
+      ret = 0;
+      goto out;
+    }
+
+  cockpit_set_journal_logging (NULL, !isatty (2));
 
   if (opt_no_tls)
     {
@@ -145,8 +163,6 @@ main (int argc,
 
   g_signal_connect (server, "handle-resource::/",
                     G_CALLBACK (cockpit_handler_resource), &data);
-  g_signal_connect (server, "handle-resource::/static/",
-                    G_CALLBACK (cockpit_handler_static), &data);
   g_signal_connect (server, "handle-resource::/cockpit/",
                     G_CALLBACK (cockpit_handler_resource), &data);
 
@@ -155,8 +171,6 @@ main (int argc,
                     G_CALLBACK (cockpit_handler_root), &data);
   g_signal_connect (server, "handle-resource::/apple-touch-icon.png",
                     G_CALLBACK (cockpit_handler_root), &data);
-
-  g_info ("HTTP Server listening on port %d", opt_port);
 
   g_main_loop_run (loop);
 
@@ -175,6 +189,7 @@ out:
   g_clear_object (&certificate);
   g_free (cert_path);
   g_strfreev (roots);
+  cockpit_conf_cleanup ();
   return ret;
 }
 

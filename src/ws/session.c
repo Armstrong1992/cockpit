@@ -20,6 +20,7 @@
 #include "config.h"
 
 #include <assert.h>
+#include <ctype.h>
 #include <err.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -32,6 +33,7 @@
 #include <sys/signal.h>
 #include <sys/resource.h>
 #include <dirent.h>
+#include <sched.h>
 #include <utmp.h>
 #include <unistd.h>
 #include <sys/types.h>
@@ -49,12 +51,12 @@
  */
 
 #define DEBUG_SESSION 0
+#define MAX_BUFFER 64 * 1024
 #define AUTH_FD 3
 #define EX 127
 
 static struct passwd *pwd;
 const char *rhost;
-char line[UT_LINESIZE + 1];
 static pid_t child;
 static char **env;
 static int want_session = 1;
@@ -67,7 +69,9 @@ static FILE *authf;
 #endif
 
 static char *
-read_auth_until_eof (size_t *out_len)
+read_fd_until_eof (int fd,
+                   const char *what,
+                   size_t *out_len)
 {
   size_t len = 0;
   size_t alloc = 0;
@@ -79,17 +83,19 @@ read_auth_until_eof (size_t *out_len)
       if (alloc <= len)
         {
           alloc += 1024;
+          if (alloc > MAX_BUFFER)
+            errx (EX, "input data is too long for %s", what);
           buf = realloc (buf, alloc);
           if (!buf)
-            errx (EX, "couldn't allocate memory for password");
+            errx (EX, "couldn't allocate memory for %s", what);
         }
 
-      r = read (AUTH_FD, buf + len, alloc - len);
+      r = read (fd, buf + len, alloc - len);
       if (r < 0)
         {
           if (errno == EAGAIN)
             continue;
-          err (EX, "couldn't read password from cockpit-ws");
+          err (EX, "couldn't read %s", what);
         }
       else if (r == 0)
         {
@@ -441,7 +447,7 @@ perform_basic (void)
   debug ("reading password from cockpit-ws");
 
   /* The input should be a user:password */
-  input = read_auth_until_eof (NULL);
+  input = read_fd_until_eof (AUTH_FD, "password", NULL);
   password = strchr (input, ':');
   if (password == NULL || strchr (password + 1, '\n'))
     {
@@ -517,7 +523,7 @@ perform_gssapi (void)
   setenv ("KRB5CCNAME", "FILE:/dev/null", 1);
 
   debug ("reading kerberos auth from cockpit-ws");
-  input.value = read_auth_until_eof (&input.length);
+  input.value = read_fd_until_eof (AUTH_FD, "gssapi data", &input.length);
 
   major = gss_accept_sec_context (&minor, &context, GSS_C_NO_CREDENTIAL, &input,
                                   GSS_C_NO_CHANNEL_BINDINGS, &name, &mech_type,
@@ -650,11 +656,14 @@ out:
 static void
 utmp_log (int login)
 {
+  char id[UT_LINESIZE + 1];
   struct utmp ut;
   struct timeval tv;
+  int pid;
 
-  int pid = getpid ();
-  const char *id = line + strlen (line) - sizeof(ut.ut_id);
+  pid = getpid ();
+
+  snprintf (id, UT_LINESIZE, "%d", pid);
 
   assert (pwd != NULL);
   utmpname (_PATH_UTMP);
@@ -664,8 +673,7 @@ utmp_log (int login)
 
   strncpy (ut.ut_id, id, sizeof (ut.ut_id));
   ut.ut_id[sizeof (ut.ut_id) - 1] = 0;
-  strncpy (ut.ut_line, line, sizeof (ut.ut_line));
-  ut.ut_line[sizeof (ut.ut_line) - 1] = 0;
+  ut.ut_line[0] = 0;
 
   if (login)
     {
@@ -679,7 +687,7 @@ utmp_log (int login)
   ut.ut_tv.tv_sec = tv.tv_sec;
   ut.ut_tv.tv_usec = tv.tv_usec;
 
-  ut.ut_type = login ? USER_PROCESS : DEAD_PROCESS;
+  ut.ut_type = login ? LOGIN_PROCESS : DEAD_PROCESS;
   ut.ut_pid = pid;
 
   pututline (&ut);
@@ -843,6 +851,68 @@ session (void)
 }
 
 static void
+maybe_nsenter (void)
+{
+  struct {
+    int type;
+    const char *name;
+    int fd;
+  } namespaces[] = {
+    { CLONE_NEWUSER, "ns/user", -1 },
+    { CLONE_NEWIPC, "ns/ipc", -1 },
+    { CLONE_NEWUTS, "ns/uts", -1 },
+    { CLONE_NEWNET, "ns/net", -1 },
+    { CLONE_NEWPID, "ns/pid", -1 },
+    { CLONE_NEWNS, "ns/mnt", -1 },
+    { 0 }
+  };
+
+  const char *baselink = "/container/target-namespace";
+  char base[256];
+  char *filename;
+  ssize_t len;
+  int i;
+
+  len = readlink (baselink, base, sizeof (base));
+  if (len < 0)
+    {
+      /* A missing namespace file is not a bug */
+      if (errno == ENOENT)
+        return;
+
+      err (EX, "couldn't read target namespace link: %s", baselink);
+    }
+  else if (len == sizeof (base))
+    {
+      errx (EX, "target namespace link too long: %s", baselink);
+    }
+
+  for (i = 0; namespaces[i].type != 0; i++)
+    {
+      if (asprintf (&filename, "%s/%s", base, namespaces[i].name) < 0)
+        errx (42, "couldn't allocate namespace name");
+      namespaces[i].fd = open (filename, O_RDONLY);
+      if (namespaces[i].fd < 0)
+        err (EX, "couldn't open namespace file: %s", filename);
+      free (filename);
+    }
+
+  for (i = 0; namespaces[i].type != 0; i++)
+    {
+      if (setns (namespaces[i].fd, namespaces[i].type) < 0)
+        {
+          /* For now we ignore errors resulting from the user namespace not being active */
+          if (namespaces[i].type != CLONE_NEWUSER || errno != EINVAL)
+            err (EX, "couldn't change into %s namespace", namespaces[i].name);
+        }
+      close (namespaces[i].fd);
+    }
+
+  if (chdir ("/") < 0)
+    err (EX, "couldn't change to root directory");
+}
+
+static void
 pass_to_child (int signo)
 {
   kill (child, signo);
@@ -921,8 +991,8 @@ main (int argc,
   signal (SIGHUP, SIG_IGN);
   signal (SIGPIPE, SIG_IGN);
 
-  snprintf (line, UT_LINESIZE, "cockpit-%d", getpid ());
-  line[UT_LINESIZE] = '\0';
+  /* Switch namespaces if we've been requested to do so */
+  maybe_nsenter ();
 
   if (strcmp (auth, "basic") == 0)
     pamh = perform_basic ();

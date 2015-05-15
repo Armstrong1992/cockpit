@@ -20,6 +20,7 @@ BUILT_SOURCES += $(test_built_sources)
 CLEANFILES += $(test_built_sources)
 
 EXTRA_DIST += \
+	src/common/mock-content \
 	src/common/com.redhat.Cockpit.DBusTests.xml \
 	$(NULL)
 
@@ -38,6 +39,8 @@ libcockpit_common_a_SOURCES = \
 	src/common/cockpitjson.c \
 	src/common/cockpitjson.h \
 	src/common/cockpitlog.h src/common/cockpitlog.c \
+	src/common/cockpitloopback.c \
+	src/common/cockpitloopback.h \
 	src/common/cockpitmemory.c \
 	src/common/cockpitmemory.h \
 	src/common/cockpittypes.h \
@@ -45,6 +48,8 @@ libcockpit_common_a_SOURCES = \
 	src/common/cockpitpipe.h \
 	src/common/cockpitpipetransport.c \
 	src/common/cockpitpipetransport.h \
+	src/common/cockpitstream.c \
+	src/common/cockpitstream.h \
 	src/common/cockpittemplate.c \
 	src/common/cockpittemplate.h \
 	src/common/cockpittest.c \
@@ -59,6 +64,8 @@ libcockpit_common_a_SOURCES = \
 	src/common/cockpitwebresponse.c \
 	src/common/cockpitwebserver.h \
 	src/common/cockpitwebserver.c \
+	src/common/cockpitconf.h \
+	src/common/cockpitconf.c \
 	$(NULL)
 
 libcockpit_common_a_CFLAGS = \
@@ -79,11 +86,13 @@ COCKPIT_CHECKS = \
 	test-hex \
 	test-json \
 	test-pipe \
+	test-stream \
 	test-transport \
 	test-unixsignal \
 	test-template \
 	test-webresponse \
 	test-webserver \
+	test-config \
 	$(NULL)
 
 test_hex_CFLAGS = $(libcockpit_common_a_CFLAGS)
@@ -97,6 +106,11 @@ test_json_LDADD = $(libcockpit_common_a_LIBS)
 test_pipe_CFLAGS = $(libcockpit_common_a_CFLAGS)
 test_pipe_SOURCES = src/common/test-pipe.c
 test_pipe_LDADD = $(libcockpit_common_a_LIBS)
+
+test_stream_CFLAGS = $(libcockpit_common_a_CFLAGS)
+test_stream_SOURCES = src/common/test-stream.c \
+	src/common/mock-io-stream.c src/common/mock-io-stream.h
+test_stream_LDADD = $(libcockpit_common_a_LIBS)
 
 test_template_CFLAGS = $(libcockpit_common_a_CFLAGS)
 test_template_SOURCES = src/common/test-template.c
@@ -120,6 +134,10 @@ test_webresponse_LDADD = $(libcockpit_common_a_LIBS)
 test_webserver_SOURCES = src/common/test-webserver.c
 test_webserver_CFLAGS = $(libcockpit_common_a_CFLAGS)
 test_webserver_LDADD = $(libcockpit_common_a_LIBS)
+
+test_config_CFLAGS = $(libcockpit_common_a_CFLAGS)
+test_config_SOURCES = src/common/test-config.c
+test_config_LDADD = $(libcockpit_common_a_LIBS)
 
 noinst_PROGRAMS += $(COCKPIT_CHECKS)
 TESTS += $(COCKPIT_CHECKS)

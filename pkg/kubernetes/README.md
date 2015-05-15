@@ -2,29 +2,25 @@ Kubernetes Proof of Concept
 ---------------------------
 
 This is proof of concept Kubernetes code. It is not yet installed as part
-of Cockpit. To use it follow the instructions below. Tested on Fedora 21
+of Cockpit. To use it follow the instructions below. Tested on Fedora 22
 and requires an otherwise working latest version of Cockpit.
 
 This sets up a single machine kubernetes master and minion:
 
     $ sudo yum install kubernetes
 
-Now in order to support the v1beta3 API, we need to build kubernetes
-from source or use a version later than v0.10.0:
+Now in order to support the latest v1beta3 API, we need to build kubernetes
+from source or use a version later than v0.14.0:
 
-    $ sudo yum install golang
-    $ git clone git://github.com/GoogleCloudPlatform/kubernetes.git
-    $ cd kubernetes
-    $ git checkout v0.10.0
-    $ make
-    $ DIST=_output/local/bin/linux/amd64/
-    $ sudo cp -v $DIST/kube* /usr/bin
+    $ sudo yum install kubernetes
+    $ sudo yum install etcd docker
 
 The v1beta3 API is not enabled by default. The kube-apiserver process needs to run
 with the --runtime_config=api/v1beta3 argument. Use the following command
 to enable it:
 
     $ sudo sed -i 's|KUBE_API_ARGS="|KUBE_API_ARGS="--runtime_config=api/v1beta3|' /etc/kubernetes/apiserver
+    $ sudo sed -i 's|KUBELET_ARGS="|KUBELET_ARGS="--api_servers=127.0.0.1:8080|' /etc/kubernetes/kubelet
 
 Now start kubernetes:
 

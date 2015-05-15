@@ -17,16 +17,22 @@
  * along with Cockpit; If not, see <http://www.gnu.org/licenses/>.
  */
 
-/* global jQuery   */
-/* global cockpit  */
-/* global _        */
-/* global C_       */
+define([
+    "jquery",
+    "base1/cockpit",
+    "domain/operation",
+    "shell/controls",
+    "shell/shell",
+    "shell/cockpit-main",
+    "system/server"
+], function($, cockpit, domain, controls, shell, main, server) {
+"use strict";
 
-var shell = shell || { };
-(function($, cockpit, shell) {
+var _ = cockpit.gettext;
+var C_ = cockpit.gettext;
 
 function update_hostname_privileged() {
-    shell.update_privileged_ui(
+    controls.update_privileged_ui(
         shell.default_permission, ".hostname-privileged",
         cockpit.format(
             _("The user <b>$0</b> is not permitted to modify hostnames"),
@@ -34,21 +40,113 @@ function update_hostname_privileged() {
     );
 }
 
-function update_realm_privileged() {
-    shell.update_privileged_ui(
-        shell.default_permission, ".realm-privileged",
-        cockpit.format(
-            _("The user <b>$0</b> is not permitted to modify realms"),
-            cockpit.user.name)
-    );
+function debug() {
+    if (window.debugging == "all" || window.debugging == "system")
+        console.debug.apply(console, arguments);
 }
 
-$(shell.default_permission).on("changed", update_realm_privileged);
 $(shell.default_permission).on("changed", update_hostname_privileged);
+
+function ServerTime() {
+    var self = this;
+
+    var client = cockpit.dbus('org.freedesktop.timedate1');
+    var timedate = client.proxy();
+
+    var time_offset = null;
+    var remote_offset = null;
+
+    self.timedate = timedate;
+
+    /*
+     * The time we return from here as its UTC time set to the
+     * server time. This is the only way to get predictable
+     * behavior and formatting of a Date() object in the absence of
+     * IntlDateFormat and  friends.
+     */
+    Object.defineProperty(self, 'now', {
+        enumerable: true,
+        get: function get() {
+            var offset = time_offset + remote_offset;
+            return new Date(offset + (new Date()).valueOf());
+        }
+    });
+
+    self.format = function format(and_time) {
+        var string = self.now.toISOString();
+        if (!and_time)
+            return string.split('T')[0];
+        var pos = string.lastIndexOf(':');
+        if (pos !== -1)
+            string = string.substring(0, pos);
+        return string.replace('T', ' ');
+    };
+
+    var interval = window.setInterval(function() {
+        $(self).triggerHandler("changed");
+    }, 30000);
+
+    function offsets(timems, offsetms) {
+        var now = new Date();
+        time_offset = (timems - now.valueOf());
+        remote_offset = offsetms;
+        $(self).triggerHandler("changed");
+    }
+
+    self.update = function update() {
+        cockpit.spawn(["/usr/bin/date", "+%s:%:z"])
+            .done(function(data) {
+                var parts = data.trim().split(":").map(function(x) {
+                    return parseInt(x, 10);
+                });
+                if (parts[1] < 0)
+                    parts[2] = -(parts[2]);
+                offsets(parts[0] * 1000, (parts[1] * 3600000) + parts[2] * 60000);
+            });
+    };
+
+    self.change_time = function change_time(datestr, hourstr, minstr) {
+        var dfd = $.Deferred();
+
+        /*
+         * The browser is brain dead when it comes to dates. But even if
+         * it wasn't, or we loaded a library like moment.js, there is no
+         * way to make sense of this date without a round trip to the
+         * server ... the timezone is really server specific.
+         */
+        cockpit.spawn(["/usr/bin/date", "--date=" + datestr + " " + hourstr + ":" + minstr, "+%s"])
+            .fail(function(ex) {
+                dfd.reject(ex);
+            })
+            .done(function(data) {
+                var seconds = parseInt(data.trim(), 10);
+                timedate.SetTime(seconds * 1000 * 1000, false, true)
+                    .fail(function(ex) {
+                        dfd.reject(ex);
+                    })
+                    .done(function() {
+                        self.update();
+                        dfd.resolve();
+                    });
+            });
+
+        return dfd;
+    };
+
+    self.close = function close() {
+        client.close();
+    };
+
+    self.update();
+}
 
 PageServer.prototype = {
     _init: function() {
         this.id = "server";
+        this.server_time = null;
+        this.os_file_name = "/etc/os-release";
+        this.client = null;
+        this.hostname_proxy = null;
     },
 
     getTitle: function() {
@@ -57,8 +155,9 @@ PageServer.prototype = {
 
     setup: function() {
         var self = this;
-        update_realm_privileged();
         update_hostname_privileged();
+
+        self.timedate = cockpit.dbus('org.freedesktop.timedate1').proxy();
 
         $('#shutdown-group').append(
               shell.action_btn(
@@ -68,130 +167,230 @@ PageServer.prototype = {
                   ])
         );
 
-        $('#server-avatar').on('click', $.proxy (this, "trigger_change_avatar"));
-        $('#server-avatar-uploader').on('change', $.proxy (this, "change_avatar"));
-
         $('#system_information_hostname_button').on('click', function () {
             PageSystemInformationChangeHostname.client = self.client;
             $('#system_information_change_hostname').modal('show');
         });
 
-        $('#system_information_realms_button').on('click', function () {
-            if (self.realms.Joined && self.realms.Joined.length > 0) {
-                var name = self.realms.Joined[0][0];
-                var details = self.realms.Joined[0][1];
-                shell.realms_op_set_parameters(self.realms, 'leave', name, details);
-                $('#realms-op').modal('show');
-            } else {
-                shell.realms_op_set_parameters(self.realms, 'join', '', { });
-                $('#realms-op').modal('show');
-            }
+        $('#system_information_systime_button').on('click', function () {
+            PageSystemInformationChangeSystime.server_time = self.server_time;
+            $('#system_information_change_systime').modal('show');
         });
+
+        self.domain_button = domain.button();
+        $("#system-info-realms td.button-location").append(self.domain_button);
+
+        self.server_time = new ServerTime();
+        $(self.server_time).on("changed", function() {
+            $('#system_information_systime_button').text(self.server_time.format(true));
+        });
+
+        self.plot_controls = shell.setup_plot_controls($('#server'), $('#server-graph-toolbar'));
+
+        var systemd_client = cockpit.dbus("org.freedesktop.systemd1", { superuser: true });
+        var systemd_manager = systemd_client.proxy("org.freedesktop.systemd1.Manager",
+                                                   "/org/freedesktop/systemd1");
+
+        self.pmlogger_onoff = controls.OnOff(false,
+                                             change_pmlogger_state,
+                                             null,
+                                             null,
+                                             null);
+
+        function change_pmlogger_state(val) {
+            function fail(error) {
+                console.warn("Enabling/disabling pmlogger failed", error.toString());
+                refresh_pmlogger_state();
+            }
+
+            systemd_manager.wait(function () {
+                if (val) {
+                    /* The "pmcd" needs to be enabled and started
+                     * explicitly as well since the "pmlogger" service
+                     * does not formally require it.
+                     */
+                    systemd_manager.EnableUnitFiles(["pmcd.service", "pmlogger.service"], false, false).
+                        done(function () {
+                            $.when(systemd_manager.StartUnit("pmcd.service", "fail"),
+                                   systemd_manager.StartUnit("pmlogger.service", "fail")).
+                                fail(fail);
+                        }).
+                        fail(fail);
+                } else {
+                    systemd_manager.StopUnit("pmlogger.service", "fail").
+                        done(function () {
+                            systemd_manager.DisableUnitFiles(["pmlogger.service"], false).
+                                fail(fail);
+                        }).
+                        fail(fail);
+                }
+            });
+        }
+
+        function refresh_pmlogger_state() {
+            systemd_manager.wait(function () {
+                systemd_manager.GetUnitFileState("pmlogger.service").
+                    done(function (state) {
+                        self.pmlogger_onoff.set(state.indexOf("enabled") === 0);
+                        $('#server-pmlogger-onoff-row').show();
+                    }).
+                    fail(function (error) {
+                        console.log(error);
+                        console.warn(error.toString());
+                        $('#server-pmlogger-onoff-row').hide();
+                    });
+            });
+        }
+
+        $(systemd_manager).on("UnitFilesChanged", refresh_pmlogger_state);
+        refresh_pmlogger_state();
+
+        $('#server-pmlogger-onoff').empty().append(self.pmlogger_onoff);
     },
 
     enter: function() {
         var self = this;
 
-        /* TODO: Need to migrate away from old dbus */
-        self.client = shell.dbus(null);
+        self.client = cockpit.dbus('org.freedesktop.hostname1');
+        self.hostname_proxy = self.client.proxy('org.freedesktop.hostname1',
+                                     '/org/freedesktop/hostname1');
+        self.kernel_hostname = null;
 
-        self.manager = self.client.get("/com/redhat/Cockpit/Manager",
-                                       "com.redhat.Cockpit.Manager");
-        $(self.manager).on('AvatarChanged.server', $.proxy (this, "update_avatar"));
+        // HACK: We really should use OperatingSystemPrettyName
+        // from hostname1 here. Once we require system > 211
+        // we should change this.
+        function parse_pretty_name(data, tag, ex) {
+            if (ex)
+                console.warn("couldn't load os data: " + ex);
 
-        $('#server-avatar').attr('src', "images/server-large.png");
+            var lines = data.split("\n");
+            for (var i = 0; i < lines.length; i++) {
+                var parts = lines[i].split("=");
+                if (parts[0] === "PRETTY_NAME") {
+                    var text = parts[1];
+                    try {
+                        text = JSON.parse(text);
+                    } catch (e) {}
+                    $("#system_information_os_text").text(text);
+                    break;
+                }
+            }
+        }
 
-        function network_setup_hook(plot) {
+        self.os_file = cockpit.file(self.os_file_name);
+        self.os_file.watch(parse_pretty_name);
+
+        var monitor;
+        var series;
+
+        /* CPU graph */
+
+        var cpu_data = {
+            direct: [ "kernel.all.cpu.nice", "kernel.all.cpu.user", "kernel.all.cpu.sys" ],
+            internal: [ "cpu.basic.nice", "cpu.basic.user", "cpu.basic.system" ],
+            units: "millisec",
+            derive: "rate",
+            factor: 0.1  // millisec / sec -> percent
+        };
+
+        var cpu_options = shell.plot_simple_template();
+        $.extend(cpu_options.yaxis, { tickFormatter: function(v) { return v.toFixed(0) + "%"; },
+                                      labelWidth: 60,
+                                      max: 100
+                                    });
+        self.cpu_plot = shell.plot($("#server_cpu_graph"), 300);
+        self.cpu_plot.set_options(cpu_options);
+        series = self.cpu_plot.add_metrics_sum_series(cpu_data, { });
+        $(series).on("value", function(ev, value) {
+            $("#server_cpu_text").text(value.toFixed(0) + "%");
+        });
+
+        /* Memory graph */
+
+        var memory_data = {
+            direct: [ "mem.util.used" ],
+            internal: [ "memory.used" ],
+            units: "bytes"
+        };
+
+        var memory_options = shell.plot_simple_template();
+        $.extend(memory_options.yaxis, { ticks: shell.memory_ticks,
+                                         tickFormatter: shell.format_bytes_tick,
+                                         labelWidth: 60
+                                       });
+        self.memory_plot = shell.plot($("#server_memory_graph"), 300);
+        self.memory_plot.set_options(memory_options);
+        series = self.memory_plot.add_metrics_sum_series(memory_data, { });
+        $(series).on("value", function(ev, value) {
+            $("#server_memory_text").text(cockpit.format_bytes(value));
+        });
+
+        /* Network graph */
+
+        var network_data = {
+            direct: [ "network.interface.total.bytes" ],
+            internal: [ "network.all.tx", "network.all.rx" ],
+            units: "bytes",
+            derive: "rate"
+        };
+
+        var network_options = shell.plot_simple_template();
+        $.extend(network_options.yaxis, { tickFormatter: shell.format_bits_per_sec_tick,
+                                          labelWidth: 60
+                                        });
+        network_options.setup_hook = function network_setup_hook(plot) {
             var axes = plot.getAxes();
             if (axes.yaxis.datamax < 100000)
                 axes.yaxis.options.max = 100000;
             else
                 axes.yaxis.options.max = null;
             axes.yaxis.options.min = 0;
-        }
+        };
 
-        var monitor = self.client.get("/com/redhat/Cockpit/CpuMonitor",
-                                      "com.redhat.Cockpit.ResourceMonitor");
-        self.cpu_plot =
-            shell.setup_simple_plot("#server_cpu_graph",
-                                      "#server_cpu_text",
-                                      monitor,
-                                      { yaxis: { ticks: 5 } },
-                                      function(values) { // Combines the series into a single plot-value
-                                          return values[1] + values[2] + values[3];
-                                      },
-                                      function(values) { // Combines the series into a textual string
-                                          var total = values[1] + values[2] + values[3];
-                                          return total.toFixed(1) + "%";
-                                      });
+        self.network_plot = shell.plot($("#server_network_traffic_graph"), 300);
+        self.network_plot.set_options(network_options);
+        series = self.network_plot.add_metrics_sum_series(network_data, { });
+        $(series).on("value", function(ev, value) {
+            $("#server_network_traffic_text").text(cockpit.format_bits_per_sec(value * 8));
+        });
 
-        monitor = self.client.get("/com/redhat/Cockpit/MemoryMonitor",
-                                  "com.redhat.Cockpit.ResourceMonitor");
-        self.memory_plot =
-            shell.setup_simple_plot("#server_memory_graph",
-                                      "#server_memory_text",
-                                      monitor,
-                                      { },
-                                      function(values) { // Combines the series into a single plot-value
-                                          return values[1] + values[2] + values[3];
-                                      },
-                                      function(values) { // Combines the series into a textual string
-                                          var total = values[1] + values[2] + values[3];
-                                          return cockpit.format_bytes(total);
-                                      });
+        /* Disk IO graph */
 
-        monitor = self.client.get("/com/redhat/Cockpit/NetworkMonitor",
-                                  "com.redhat.Cockpit.ResourceMonitor");
-        self.network_traffic_plot =
-            shell.setup_simple_plot("#server_network_traffic_graph",
-                                      "#server_network_traffic_text",
-                                      monitor,
-                                      { setup_hook: network_setup_hook },
-                                      function(values) { // Combines the series into a single plot-value
-                                          return values[0] + values[1];
-                                      },
-                                      function(values) { // Combines the series into a textual string
-                                          var total = values[0] + values[1];
-                                          return cockpit.format_bits_per_sec(total * 8);
-                                      });
+        var disk_data = {
+            direct: [ "disk.dev.total_bytes" ],
+            internal: [ "block.device.read", "block.device.written" ],
+            units: "bytes",
+            derive: "rate"
+        };
 
-        monitor = self.client.get("/com/redhat/Cockpit/DiskIOMonitor",
-                                  "com.redhat.Cockpit.ResourceMonitor");
-        self.disk_io_plot =
-            shell.setup_simple_plot("#server_disk_io_graph",
-                                      "#server_disk_io_text",
-                                      monitor,
-                                      { },
-                                      function(values) { // Combines the series into a single plot-value
-                                          return values[0] + values[1];
-                                      },
-                                      function(values) { // Combines the series into a textual string
-                                          var total = values[0] + values[1];
-                                          return cockpit.format_bytes_per_sec(total);
-                                      });
-
+        var disk_options = shell.plot_simple_template();
+        $.extend(disk_options.yaxis, { ticks: shell.memory_ticks,
+                                       tickFormatter: shell.format_bytes_per_sec_tick,
+                                       labelWidth: 60
+                                     });
+        self.disk_plot = shell.plot($("#server_disk_io_graph"), 300);
+        self.disk_plot.set_options(disk_options);
+        series = self.disk_plot.add_metrics_sum_series(disk_data, { });
+        $(series).on("value", function(ev, value) {
+            $("#server_disk_io_text").text(cockpit.format_bytes_per_sec(value));
+        });
 
         shell.util.machine_info(null).
             done(function (info) {
-                // TODO - round memory to something nice and/or adjust
-                //        the ticks.
-                self.cpu_plot.set_yaxis_max(info.cpus*100);
-                self.memory_plot.set_yaxis_max(info.memory);
+                cpu_options.yaxis.max = info.cpus * 100;
+                self.cpu_plot.set_options(cpu_options);
+                memory_options.yaxis.max = info.memory;
+                self.memory_plot.set_options(memory_options);
             });
 
-        self.update_avatar ();
+        self.plot_controls.reset([ self.cpu_plot, self.memory_plot, self.network_plot, self.disk_plot ]);
 
-        function bindf(sel, object, prop, func) {
-            function update() {
-                $(sel).text(func(object[prop]));
-            }
-            $(object).on('notify:' + prop + '.server', update);
-            update();
-        }
-
-        function bind(sel, object, prop) {
-            bindf(sel, object, prop, function (s) { return s; });
-        }
+        $(cockpit).on('resize.server', function () {
+            self.cpu_plot.resize();
+            self.memory_plot.resize();
+            self.network_plot.resize();
+            self.disk_plot.resize();
+        });
 
         /*
          * Parses output like:
@@ -210,7 +409,7 @@ PageServer.prototype = {
         }
 
         cockpit.spawn(["grep", "\\w", "bios_vendor", "bios_version", "bios_date", "sys_vendor", "product_name"],
-                      { directory: "/sys/devices/virtual/dmi/id" })
+                      { directory: "/sys/devices/virtual/dmi/id", err: "ignore" })
             .done(function(output) {
                 var fields = parse_lines(output);
                 $("#system_information_bios_text").text(fields.bios_vendor + " " +
@@ -220,51 +419,52 @@ PageServer.prototype = {
                                                             fields.product_name);
             })
             .fail(function(ex) {
-                console.warn("couldn't read dmi info: " + ex);
+                debug("couldn't read dmi info: " + ex);
             });
 
         cockpit.spawn(["grep", "\\w", "product_serial", "chassis_serial"],
-                      { directory: "/sys/devices/virtual/dmi/id", superuser: true })
+                      { directory: "/sys/devices/virtual/dmi/id", superuser: true, err: "ignore" })
             .done(function(output) {
                 var fields = parse_lines(output);
                 $("#system_information_asset_tag_text").text(fields.product_serial ||
                                                              fields.chassis_serial);
             })
             .fail(function(ex) {
-                if (ex.problem != "not-authorized")
-                    console.warn("couldn't read serial dmi info: " + ex);
+                debug("couldn't read serial dmi info: " + ex);
             });
 
-        bind("#system_information_os_text", self.manager, "OperatingSystem");
-
         function hostname_text() {
-            var pretty_hostname = self.manager.PrettyHostname;
-            var static_hostname = self.manager.StaticHostname;
-            var str;
-            if (!pretty_hostname || pretty_hostname == static_hostname)
-                str = static_hostname;
-            else
+            var pretty_hostname = self.hostname_proxy.PrettyHostname;
+            var static_hostname = self.hostname_proxy.StaticHostname;
+
+            var str = self.kernel_hostname;
+            if (pretty_hostname && static_hostname && static_hostname != pretty_hostname)
                 str = pretty_hostname + " (" + static_hostname + ")";
-            if (str === "")
+            else if (static_hostname)
+                str = static_hostname;
+
+            if (!str)
                 str = _("Set Host name");
-	    return str;
+            $("#system_information_hostname_button").text(str);
         }
 
-        bindf("#system_information_hostname_button", self.manager, "StaticHostname", hostname_text);
-        bindf("#system_information_hostname_button", self.manager, "PrettyHostname", hostname_text);
-
-        self.realms = self.client.get("/com/redhat/Cockpit/Realms", "com.redhat.Cockpit.Realms");
-
-        $(self.realms).on('notify:Joined.server',
-                          $.proxy(self, "update_realms"));
-        self.update_realms();
+        cockpit.spawn(["hostname"], { err: "ignore" })
+            .done(function(output) {
+                self.kernel_hostname = $.trim(output);
+                hostname_text();
+            })
+            .fail(function(ex) {
+                hostname_text();
+                debug("couldn't read kernel hostname: " + ex);
+            });
+        $(self.hostname_proxy).on("changed", hostname_text);
     },
 
     show: function() {
-        this.cpu_plot.start();
-        this.memory_plot.start();
-        this.disk_io_plot.start();
-        this.network_traffic_plot.start();
+        this.cpu_plot.start_walking();
+        this.memory_plot.start_walking();
+        this.disk_plot.start_walking();
+        this.network_plot.start_walking();
     },
 
     leave: function() {
@@ -272,68 +472,25 @@ PageServer.prototype = {
 
         self.cpu_plot.destroy();
         self.memory_plot.destroy();
-        self.disk_io_plot.destroy();
-        self.network_traffic_plot.destroy();
+        self.disk_plot.destroy();
+        self.network_plot.destroy();
 
-        $(self.manager).off('.server');
-        self.manager = null;
-        $(self.realms).off('.server');
-        self.realms = null;
-        $(self.client).off('.server');
-        self.client.release();
+        self.os_file.close();
+        self.os_file = null;
+
+        $(self.hostname_proxy).off();
+        self.hostname_proxy = null;
+
+        self.client.close();
         self.client = null;
+
+        $(cockpit).off('.server');
     },
 
     shutdown: function(action_type) {
         PageShutdownDialog.type = action_type;
         $('#shutdown-dialog').modal('show');
     },
-
-    start_plots: function () {
-        var self = this;
-
-    },
-
-    update_avatar: function () {
-        this.manager.call('GetAvatarDataURL', function (error, result) {
-            if (result)
-                $('#server-avatar').attr('src', result);
-        });
-    },
-
-    trigger_change_avatar: function() {
-        if (window.File && window.FileReader)
-            $('#server-avatar-uploader').trigger('click');
-    },
-
-    change_avatar: function() {
-        var me = this;
-        shell.show_change_avatar_dialog('#server-avatar-uploader',
-                                           function (data) {
-                                               me.manager.call('SetAvatarDataURL', data,
-                                                               function (error) {
-                                                                   if (error)
-                                                                       shell.show_unexpected_error(error);
-                                                               });
-                                           });
-    },
-
-    update_realms: function() {
-        var self = this;
-        var joined = self.realms.Joined;
-
-        function realms_text(val) {
-            if (!val || val.length === 0)
-                return _("Join Domain");
-
-            var res = [ ];
-            for (var i = 0; i < val.length; i++)
-                res.push(val[i][0]);
-            return res.join (", ");
-        }
-
-        $('#system_information_realms_button').text(realms_text(joined));
-    }
 };
 
 function PageServer() {
@@ -356,10 +513,10 @@ PageSystemInformationChangeHostname.prototype = {
     enter: function() {
         var self = this;
 
-        self.manager = PageSystemInformationChangeHostname.client.get("/com/redhat/Cockpit/Manager",
-                                                                      "com.redhat.Cockpit.Manager");
-        self._initial_hostname = self.manager.StaticHostname || "";
-        self._initial_pretty_hostname = self.manager.PrettyHostname || "";
+        self.hostname_proxy = PageSystemInformationChangeHostname.client.proxy();
+
+        self._initial_hostname = self.hostname_proxy.StaticHostname || "";
+        self._initial_pretty_hostname = self.hostname_proxy.PrettyHostname || "";
         $("#sich-pretty-hostname").val(self._initial_pretty_hostname);
         $("#sich-hostname").val(self._initial_hostname);
 
@@ -372,6 +529,7 @@ PageSystemInformationChangeHostname.prototype = {
     },
 
     leave: function() {
+        this.hostname_proxy = null;
     },
 
     _on_apply_button: function(event) {
@@ -379,14 +537,18 @@ PageSystemInformationChangeHostname.prototype = {
 
         var new_full_name = $("#sich-pretty-hostname").val();
         var new_name = $("#sich-hostname").val();
-        self.manager.call("SetHostname",
-                          new_full_name, new_name, {},
-                          function(error, reply) {
-                              $("#system_information_change_hostname").modal('hide');
-                              if(error) {
-                                  shell.show_unexpected_error(error);
-                              }
-                          });
+
+        function on_done(resp) {
+            $("#system_information_change_hostname").modal('hide');
+        }
+        function on_fail(error) {
+            $("#system_information_change_hostname").modal('hide');
+            shell.show_unexpected_error(error);
+        }
+        self.hostname_proxy.call("SetStaticHostname", [new_name, true])
+                     .done(on_done).fail(on_fail);
+        self.hostname_proxy.call("SetPrettyHostname", [new_full_name, true])
+                     .done(on_done).fail(on_fail);
     },
 
     _on_full_name_changed: function(event) {
@@ -492,6 +654,133 @@ function PageSystemInformationChangeHostname() {
 
 shell.dialogs.push(new PageSystemInformationChangeHostname());
 
+PageSystemInformationChangeSystime.prototype = {
+    _init: function() {
+        this.id = "system_information_change_systime";
+    },
+
+    setup: function() {
+        $("#systime-apply-button").on("click", $.proxy(this._on_apply_button, this));
+        $('#change_systime').on('change', $.proxy(this, "update"));
+        $('#systime-time-minutes').on('focusout', $.proxy(this, "update_minutes"));
+        $('#systime-time-minutes').on('change', $.proxy(this, "check_input"));
+        $('#systime-time-hours').on('change', $.proxy(this, "check_input"));
+        $('#systime-date-input').on('change', $.proxy(this, "check_input"));
+        $('#systime-date-input').datepicker({
+            autoclose: true,
+            todayHighlight: true,
+            format: 'yyyy-mm-dd'
+        });
+    },
+
+    enter: function() {
+        var server_time = PageSystemInformationChangeSystime.server_time;
+
+        $('#systime-date-input').val(server_time.format());
+        $('#systime-time-minutes').val(server_time.now.getUTCMinutes());
+        $('#systime-time-hours').val(server_time.now.getUTCHours());
+        $('#change_systime').val(server_time.timedate.NTP ? 'ntp_time' : 'manual_time');
+        $('#change_systime').selectpicker('refresh');
+        $('#systime-parse-error').css('visibility', 'hidden');
+        $('#systime-apply-button').prop('disabled', false);
+
+        this.update();
+        this.update_minutes();
+    },
+
+    show: function() {
+    },
+
+    leave: function() {
+    },
+
+    _on_apply_button: function(event) {
+        var server_time = PageSystemInformationChangeSystime.server_time;
+
+        var manual_time = $('#change_systime').val() == 'manual_time';
+        if (manual_time && !this.check_input())
+            return;
+
+        server_time.timedate.SetNTP($('#change_systime').val() == 'ntp_time', true)
+            .fail(function(err) {
+                shell.show_unexpected_error(err);
+                $("#system_information_change_systime").modal('hide');
+            })
+            .done(function() {
+                if (!manual_time) {
+                    $("#system_information_change_systime").modal('hide');
+                    return;
+                }
+
+                server_time.change_time($("#systime-date-input").val(),
+                                        $('#systime-time-hours').val(),
+                                        $('#systime-time-minutes').val())
+                    .fail(function(err) {
+                        shell.show_unexpected_error(err);
+                    })
+                    .always(function() {
+                        $("#system_information_change_systime").modal('hide');
+                    });
+            });
+    },
+
+    check_input: function() {
+        var time_error = false;
+        var date_error = false;
+        var new_date;
+
+        var hours = parseInt($('#systime-time-hours').val(), 10);
+        var minutes = parseInt($('#systime-time-minutes').val(), 10);
+
+        if (isNaN(hours) || hours < 0 || hours > 23  ||
+            isNaN(minutes) || minutes < 0 || minutes > 59) {
+           time_error = true;
+        }
+
+        new_date = new Date($("#systime-date-input").val());
+
+        if (isNaN(new_date.getTime()) || new_date.getTime() < 0)
+            date_error = true;
+
+        if (time_error && date_error)
+           $('#systime-parse-error').text(_("Invalid date format and invalid time format"));
+        else if (time_error)
+           $('#systime-parse-error').text(_("Invalid time format"));
+        else if (date_error)
+           $('#systime-parse-error').text(_("Invalid date format"));
+        else
+           $('#systime-parse-error').css('visibility', 'hidden');
+
+        if (time_error || date_error) {
+            $('#systime-parse-error').css('visibility', 'visible');
+            $('#systime-apply-button').prop('disabled', true);
+            return false;
+        } else {
+            $('#systime-parse-error').css('visibility', 'hidden');
+            $('#systime-apply-button').prop('disabled', false);
+            return true;
+        }
+    },
+
+    update: function() {
+        var ntp_time = $('#change_systime').val() === 'ntp_time';
+        $("#systime-date-input").prop('disabled', ntp_time);
+        $("#systime-time-hours").prop('disabled', ntp_time);
+        $("#systime-time-minutes").prop('disabled', ntp_time);
+    },
+
+    update_minutes: function() {
+        var val = parseInt($('#systime-time-minutes').val(), 10);
+        if (val < 10)
+            $('#systime-time-minutes').val("0" + val);
+    }
+};
+
+function PageSystemInformationChangeSystime() {
+    this._init();
+}
+
+shell.dialogs.push(new PageSystemInformationChangeSystime());
 
 PageShutdownDialog.prototype = {
     _init: function() {
@@ -594,4 +883,4 @@ function PageShutdownDialog() {
 
 shell.dialogs.push(new PageShutdownDialog());
 
-})(jQuery, cockpit, shell);
+});

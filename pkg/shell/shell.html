@@ -4,13 +4,42 @@
     <title>Cockpit</title>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link href="../base1/cockpit.css" rel="stylesheet">
     <link href="shell.css" rel="stylesheet">
-    <link href="bootstrap-datetimepicker.css" rel="stylesheet">
-    <script src="../base1/jquery.js"></script>
-    <script src="bootstrap-datetimepicker.js"></script>
-    <script src="../base1/mustache.js"></script>
-    <script src="../base1/cockpit.js"></script>
+    <script src="../base1/bundle.js"></script>
+    <script src="../shell/bundle.js"></script>
+    <script src="../system/bundle.js"></script>
+    <script src="../domain/bundle.js"></script>
     <script src="shell.js"></script>
+    <script>
+        require([
+            "base1/cockpit",
+            "shell/shell",
+            "shell/controls",
+            "shell/dbus",
+            "shell/plot",
+            "shell/canvas",
+            "shell/cockpit-main",
+            "shell/cockpit-accounts",
+            "shell/cockpit-cpu-status",
+            "shell/cockpit-dashboard",
+            "shell/cockpit-docker",
+            "shell/cockpit-memory-status",
+            "shell/cockpit-networking",
+            "shell/cockpit-plot",
+            "shell/cockpit-server",
+            "shell/cockpit-setup",
+            "shell/cockpit-storage",
+            "shell/cockpit-util",
+        ], function(cockpit, shell) {
+
+            /* TODO: Some legacy code expects a global cockpit */
+            window.cockpit = cockpit;
+
+            /* Start the actual shell initialization once everything is loaded */
+            shell.init();
+        });
+    </script>
   </head>
   <body>
     <div id="shell-header-extra">
@@ -21,19 +50,28 @@
       <div id="dashboard" class="container-fluid" hidden>
         <div class="row">
           <div class="col-md-12">
-            <div id="dashboard-toolbar" class="pull-right" hidden>
-              <div class="btn-toolbar">
-                <div class="btn-group" id="dashboard-range-buttons">
-                  <button class="btn btn-default" data-seconds="604800">1 week</button>
-                  <button class="btn btn-default" data-seconds="86400">1 day</button>
-                  <button class="btn btn-default" data-seconds="21600">6 hours</button>
-                  <button class="btn btn-default" data-seconds="3600">1 hour</button>
-                  <button class="btn btn-default" data-seconds="300">5 minutes</button>
-                </div>
-                <div class="btn-group">
-                  <button class="btn btn-default" id="dashboard-scroll-left">&lt;</button>
-                  <button class="btn btn-default" id="dashboard-scroll-right">&gt;</button>
-                </div>
+            <div id="dashboard-toolbar" class="pull-right zoom-controls">
+              <div class="dropdown" style="display:inline-block">
+                <button class="btn btn-default dropdown-toggle" data-toggle="dropdown">
+                  <span style="width:6em;text-align:left;padding-left:5px;display:inline-block"></span>
+                  <span class="caret"></span>
+                </button>
+                <ul class="dropdown-menu" role="menu">
+                  <li role="presentation"><a role="menuitem" tabindex="-1" data-action="goto-now">Go to now</a></li>
+                  <li role="presentation" class="divider"></li>
+                  <li role="presentation"><a role="menuitem" tabindex="-1" data-range="300">5 minutes</a></li>
+                  <li role="presentation"><a role="menuitem" tabindex="-1" data-range="3600">1 hour</a></li>
+                  <li role="presentation"><a role="menuitem" tabindex="-1" data-range="21600">6 hours</a></li>
+                  <li role="presentation"><a role="menuitem" tabindex="-1" data-range="86400">1 day</a></li>
+                  <li role="presentation"><a role="menuitem" tabindex="-1" data-range="604800">1 week</a></li>
+                </ul>
+              </div>
+              <button class="btn btn-default" data-action="zoom-out">
+                <span class="glyphicon glyphicon-zoom-out"></span>
+              </button>
+              <div class="btn-group">
+                <button class="btn btn-default fa fa-angle-left" data-action="scroll-left"></button>
+                <button class="btn btn-default fa fa-angle-right" data-action="scroll-right"></button>
               </div>
             </div>
             <ul class="nav nav-tabs">
@@ -43,10 +81,10 @@
               <li data-monitor-id="3"><a>Disk I/O</a></li>
             </ul>
             <br>
-            <div class="dashboard-plot" id="dashboard-plot-0" style="height:250px"></div>
-            <div class="dashboard-plot" id="dashboard-plot-1" style="height:250px"></div>
-            <div class="dashboard-plot" id="dashboard-plot-2" style="height:250px"></div>
-            <div class="dashboard-plot" id="dashboard-plot-3" style="height:250px"></div>
+            <div class="dashboard-plot zoomable-plot" id="dashboard-plot-0" style="height:250px"></div>
+            <div class="dashboard-plot zoomable-plot" id="dashboard-plot-1" style="height:250px"></div>
+            <div class="dashboard-plot zoomable-plot" id="dashboard-plot-2" style="height:250px"></div>
+            <div class="dashboard-plot zoomable-plot" id="dashboard-plot-3" style="height:250px"></div>
           </div>
         </div>
         <div class="row">
@@ -69,10 +107,10 @@
           {{! state can be 'failed' or 'connected' }}
           <a data-address="{{address}}" class="list-group-item {{state}}"
               style="border-left-color: {{ color }};" target="_parent" href="/#/@{{address}}/system/host">
-            <button class="btn btn-danger edit-button pficon btn-delete pficon-delete"></button>
-            <button class="btn btn-default edit-button pficon pficon-edit"></button>
+            <button class="btn btn-danger edit-button servers-privileged pficon btn-delete pficon-delete delete-{{address}}"></button>
+            <button class="btn btn-default edit-button servers-privileged pficon pficon-edit"></button>
             <img class="host-avatar" src="{{render_avatar}}">
-            <span>{{display_name}}</span>
+            <span>{{label}}</span>
           </a>
         {{/machines}}
       </script>
@@ -100,36 +138,77 @@
               <td>Host Name</td>
               <td><button class="btn btn-default hostname-privileged" id="system_information_hostname_button"></button></td>
             </tr>
-            <tr>
+            <tr id="system-info-realms">
               <td>Domain</td>
-              <td>
-                <button class="btn btn-default realm-privileged" id="system_information_realms_button"></button>
+              <td class="button-location">
               </td>
+            </tr>
+            <tr>
+              <td>System Time</td>
+              <td><button class="btn btn-default systime-privileged" id="system_information_systime_button"></button></td>
             </tr>
             <tr>
               <td translatable="yes">Power Options</td>
               <td id="shutdown-group">
               </td>
             </tr>
+            <tr id="server-pmlogger-onoff-row" hidden>
+              <td translatable="yes">Store performance data</td>
+              <td id="server-pmlogger-onoff">
+              </td>
+            </tr>
           </table>
         </div>
         <div id="server-graph-columns" class="col-md-8 col-lg-9">
-          <div id="server-graph-column-1" class="col-md-12 col-lg-6">
-            <div style="color:black">CPU<span style="float:right" id="server_cpu_text"></span></div>
-            <div style="height:120px" id="server_cpu_graph" class="server-graph" onclick="cockpit.location.go('cpu_status');"></div>
-            <br/>
-            <div style="color:black">Memory<span style="float:right" id="server_memory_text"></span></div>
-            <div style="height:120px" id="server_memory_graph" class="server-graph" onclick="cockpit.location.go('memory_status');"></div>
-            <br/>
+          <div id="server-graph-toolbar" class="pull-right zoom-controls">
+            <div class="dropdown" style="display:inline-block">
+              <button class="btn btn-default dropdown-toggle" data-toggle="dropdown">
+                <span style="width:6em;text-align:left;padding-left:5px;display:inline-block"></span>
+                <span class="caret"></span>
+              </button>
+              <ul class="dropdown-menu" role="menu">
+                <li role="presentation"><a role="menuitem" tabindex="-1" data-action="goto-now">Go to now</a></li>
+                <li role="presentation" class="divider"></li>
+                <li role="presentation"><a role="menuitem" tabindex="-1" data-range="300">5 minutes</a></li>
+                <li role="presentation"><a role="menuitem" tabindex="-1" data-range="3600">1 hour</a></li>
+                <li role="presentation"><a role="menuitem" tabindex="-1" data-range="21600">6 hours</a></li>
+                <li role="presentation"><a role="menuitem" tabindex="-1" data-range="86400">1 day</a></li>
+                <li role="presentation"><a role="menuitem" tabindex="-1" data-range="604800">1 week</a></li>
+              </ul>
+            </div>
+            <button class="btn btn-default" data-action="zoom-out">
+              <span class="glyphicon glyphicon-zoom-out"></span>
+            </button>
+            <div class="btn-group">
+              <button class="btn btn-default fa fa-angle-left" data-action="scroll-left"></button>
+              <button class="btn btn-default fa fa-angle-right" data-action="scroll-right"></button>
+            </div>
           </div>
-          <div id="server-graph-column-2" class="col-md-12 col-lg-6">
-            <div style="color:black">Disk I/O<span style="float:right" id="server_disk_io_text"></span></div>
-            <div style="height:120px" id="server_disk_io_graph" class="server-graph" onclick="cockpit.jump('/storage/devices');"></div>
-            <br/>
-            <div style="color:black">Network Traffic<span style="float:right" id="server_network_traffic_text"></span></div>
-            <div style="height:120px" id="server_network_traffic_graph" class="server-graph" onclick="cockpit.jump('/network/interfaces');"></div>
-            <br/>
+          <br/>
+          <br/>
+          <div style="color:black">
+            <a onclick="cockpit.location.go('cpu_status');">CPU</a>
+            <span style="float:right" id="server_cpu_text"></span>
           </div>
+          <div style="height:120px" id="server_cpu_graph" class="server-graph zoomable-plot"></div>
+          <br/>
+          <div style="color:black">
+            <a onclick="cockpit.location.go('memory_status');">Memory</a>
+            <span style="float:right" id="server_memory_text"></span>
+          </div>
+          <div style="height:120px" id="server_memory_graph" class="server-graph zoomable-plot"></div>
+          <br/>
+          <div style="color:black">
+            <a onclick="cockpit.jump('/network/interfaces');">Network Traffic</a>
+            <span style="float:right" id="server_network_traffic_text"></span>
+          </div>
+          <div style="height:120px" id="server_network_traffic_graph" class="server-graph zoomable-plot"></div>
+          <br/>
+          <div style="color:black">
+            <a onclick="cockpit.jump('/storage/devices');">Disk I/O</a>
+            <span style="float:right" id="server_disk_io_text"></span>
+          </div>
+          <div style="height:120px" id="server_disk_io_graph" class="server-graph zoomable-plot"></div>
         </div>
       </div>
 
@@ -142,6 +221,11 @@
       </div>
 
       <div id="storage" hidden>
+        <div class="alert alert-error" id="storage-not-supported" hidden>
+          <span class="fa fa-exclamation-circle"></span>
+          <span translatable="yes">The UDisks and/or storaged API is not available on this system.</span>
+        </div>
+
         <div class="col-md-8 col-lg-9">
 
           <div class="row">
@@ -494,132 +578,6 @@
         </div>
       </div>
 
-      <div id="services" class="container-fluid" hidden>
-        <div class="row" id="services-graphs">
-          <div class="col-sm-6">
-            <div>Combined CPU usage<span style="float:right" id="services-cpu-text"></span></div>
-            <div style="height:120px" id="services-cpu-graph"></div>
-          </div>
-          <div class="col-sm-6">
-            <div>Combined memory usage<span style="float:right" id="services-mem-text"></span></div>
-            <div style="height:120px" id="services-mem-graph"></div>
-          </div>
-        </div>
-        <br/>
-        <div class="panel panel-default">
-          <div class="panel-heading">Enabled</div>
-          <table class="table table-hover">
-            <tbody id="services-list-enabled">
-            </tbody>
-          </table>
-        </div>
-        <div class="panel panel-default">
-          <div class="panel-heading">Disabled</div>
-          <table class="table table-hover">
-            <tbody id="services-list-disabled">
-            </tbody>
-          </table>
-        </div>
-        <div class="panel panel-default">
-          <div class="panel-heading">Static</div>
-          <table class="table table-hover">
-            <tbody id="services-list-static">
-            </tbody>
-          </table>
-        </div>
-        <button class="btn btn-default services-privileged" id="services-add">Add Service</button>
-      </div>
-
-      <div id="service" class="container-fluid" hidden>
-        <ol class="breadcrumb">
-          <li><a onclick="cockpit.location.go('services')">Services</a></li>
-          <li class="active"></li>
-        </ol>
-        <div class="row" id="service-graphs">
-          <div class="col-sm-6">
-            <div>CPU usage<span style="float:right" id="service-cpu-text"></span></div>
-            <div style="height:120px" id="service-cpu-graph"></div>
-          </div>
-          <div class="col-sm-6">
-            <div>Memory usage<span style="float:right" id="service-mem-text"></span></div>
-            <div style="height:120px" id="service-mem-graph"></div>
-          </div>
-        </div>
-        <br/>
-        <div class="panel panel-default">
-          <div class="panel-heading" id="service-name"></div>
-          <div id="service-known" class="list-group">
-            <div class="list-group-item">
-              <table style="width:100%">
-                <tr>
-                  <td style="text-align:left">
-                    <span id="service-active-state"
-                          style="font-weight:bold"></span>
-                    (<span id="service-sub-state"></span>) <br/>
-                    <span translatable="yes">Since</span> <span id="service-since"></span>.
-                  </td>
-                  <td style="text-align:right" id="service-unit-action-btn">
-                  </td>
-                </tr>
-              </table>
-            </div>
-            <div class="list-group-item" id="service-instantiate-row">
-              <table style="width:100%">
-                <tr>
-                  <td style="text-align:left">
-                    <input id="service-parameter" type="text">
-                  </td>
-                  <td style="text-align:right">
-                    <button class="btn btn-default services-privileged" id="service-instantiate"
-                            translatable="yes">Instantiate</button>
-                  </td>
-                </tr>
-              </table>
-            </div>
-            <div class="list-group-item" id="service-file-row">
-              <table style="width:100%">
-                <tr>
-                  <td style="text-align:left">
-                    <span id="service-file-box">
-                      <span id="service-load-state"></span>
-                      (<span id="service-file"></span>; <span id="service-file-state"></span>)
-                    </span>
-                    <span id="service-load-error-box">
-                      <span style="color:red">Error</span>
-                      (Reason: <span id="service-load-error"></span>)
-                    </span>
-                    <span id="service-template-box">
-                      <span id="service-template-state"></span>
-                    </span>
-                  </td>
-                  <td style="text-align:right" id="service-file-action-btn">
-                  </td>
-                </tr>
-              </table>
-            </div>
-            <div class="list-group-item" id="service-template-row">
-              <table style="width:100%">
-                <tr>
-                  <td id="service-template-link">
-                  </td>
-                </tr>
-              </table>
-            </div>
-          </div>
-          <div id="service-unknown" translatable="yes">Unknown</div>
-        </div>
-        <div class="panel panel-default">
-          <div class="panel-heading" translatable="yes">Service Processes</div>
-          <div class="panel-body" id="service-processes"></div>
-        </div>
-        <div class="panel panel-default cockpit-log-panel" id="service-log-box">
-          <div class="panel-heading" translatable="yes">Service Journal</div>
-          <div class="panel-body" id="service-log"></div>
-        </div>
-
-        <button class="btn btn-default" translatable="yes" id="service-refresh">Refresh</button>
-      </div>
-
       <div id="accounts" class="container-fluid" hidden>
         <button class="btn btn-default accounts-privileged" id="accounts-create" translatable="yes">Create New Account</button>
         <div id="accounts-list">
@@ -634,12 +592,8 @@
         <center>
           <table>
             <tr>
-              <td>
-                <input data-role="none" type="file"
-                       id="account-avatar-uploader" style="display:none"/>
-                <img id="account-pic" width="128" height="128">
-              </td>
-              <td style="vertical-align:bottom"><input id="account-real-name" class="form-control"></td>
+              <td translatable="yes">Full Name</td>
+              <td style="vertical-align:bottom"><input id="account-real-name" class="form-control accounts-privileged"></td>
             </tr>
             <tr>
               <td translatable="yes">User Name</td>
@@ -677,6 +631,7 @@
           <br/>
           <div id="containers-failure-message"></div>
           <br/>
+          <div id="containers-failure-waiting" class="spinner"></div>
           <button class="btn btn-primary" id="containers-failure-start">Start Docker</button>
           <button class="btn btn-primary" id="containers-failure-retry">Try again</button>
         </center>
@@ -710,7 +665,7 @@
                   <th class="container-col-cpu">CPU</th>
                   <th class="container-col-memory-graph">Memory</th>
                   <th class="container-col-memory-text"></th>
-                  <th class="container-col-actions cell-buttons"></td></th>
+                  <th class="container-col-actions cell-buttons"></th>
                 </tr>
               </thead>
               <tbody>
@@ -777,7 +732,7 @@
                         data-toggle="modal" data-target="#container-commit-dialog">
                   Commit
                 </button>
-                <div class="waiting" style="display: none;"></div>
+                <div class="spinner" style="display: none;"></div>
               </div>
             </div>
           </div>
@@ -862,7 +817,7 @@
               <div class="pull-right" style="height:25px" id="image-details-buttons">
                 <button class="btn btn-default" id="image-details-run">Run</button>
                 <button class="btn btn-danger" id="image-details-delete">Delete</button>
-                <div class="waiting" style="display: none;"></div>
+                <div class="spinner" style="display: none;"></div>
               </div>
             </div>
           </div>
@@ -981,11 +936,13 @@
           <div class="modal-body">
             <table class="cockpit-form-table">
               <tr>
-                <td>Pretty Host Name</td>
+                <td><label class="control-label" for="sich-pretty-hostname"
+                        translatable="yes">Pretty Host Name</label></td>
                 <td><input id="sich-pretty-hostname" class="form-control"></td>
               </tr>
               <tr>
-                <td>Real Host Name</td>
+                <td><label class="control-label" for="sich-hostname"
+                        translatable="yes">Real Host Name</label></td>
                 <td><div id=sich-hostname-error>
                     <input id="sich-hostname" class="form-control">
                 </div></td>
@@ -1009,6 +966,54 @@
               Cancel
             </button>
             <button class="btn btn-primary" id="sich-apply-button">
+              Change
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+
+    <div class="modal" id="system_information_change_systime"
+         tabindex="-1" role="dialog"
+         data-backdrop="static">
+      <div class="modal-dialog modal-sm">
+        <div class="modal-content">
+          <div class="modal-header">
+            <h4 class="modal-title">Change System Time</h4>
+          </div>
+          <div class="modal-body">
+            <div class="form-group row">
+              <div class="col-md-12">
+                <select class="form-control selectpicker" id="change_systime">
+                  <option value="manual_time">Manually set the time</option>
+                  <option value="ntp_time">Set time automatically using NTP</option>
+                </select>
+              </div>
+            </div>
+            <div class="form-group row nomargin">
+                <div class="col-md-7 nopadding">
+                  <input type='text' class="form-control" id="systime-date-input"/>
+                </div>
+                <div class="col-md-5 row nomargin nopadding">
+                    <div class="col-md-offset-1 col-md-5 nopadding">
+                      <input type='text' class="form-control" id="systime-time-hours"/>
+                    </div>
+                    <div class="col-md-1 text-center nopadding">:</div>
+                    <div class="col-md-5 nopadding">
+                      <input type='text' class="form-control" id="systime-time-minutes"/>
+                    </div>
+                </div>
+            </div>
+            <div class="has-error">
+              <span id="systime-parse-error" class="help-block"></span>
+            </div>
+          </div>
+          <div class="modal-footer">
+            <button class="btn btn-default" data-dismiss="modal">
+              Cancel
+            </button>
+            <button class="btn btn-primary" id="systime-apply-button">
               Change
             </button>
           </div>
@@ -1044,13 +1049,15 @@
               <p>Log in to <span id="dashboard_setup_login_address"></span>.</p>
               <table class="cockpit-form-table">
                 <tr>
-                  <td>User Name</td>
+                  <td><label class="control-label" for="dashboard_setup_login_user"
+                          translatable="yes">User Name</label></td>
                   <td id="login_user_cell">
                     <input type="text" class="form-control" id="dashboard_setup_login_user"/>
                   </td>
                 </tr>
                 <tr>
-                  <td>Password</td>
+                  <td><label class="control-label" for="dashboard_setup_login_password"
+                          translatable="yes">Password</label></td>
                   <td>
                     <input type="password" class="form-control" id="dashboard_setup_login_password"/>
                   </td>
@@ -1083,6 +1090,7 @@
 
           </div>
           <div class="modal-footer">
+            <div class="spinner spinner-sm pull-left" id="dashboard_setup_spinner" hidden></div>
             <button class="btn btn-default" id="dashboard_setup_prev">
               Previous
             </button>
@@ -1094,116 +1102,6 @@
       </div>
     </div>
 
-    <div class="modal" id="realms-op"
-         tabindex="-1" role="dialog"
-         data-backdrop="static">
-      <div class="modal-dialog">
-        <div class="modal-content">
-          <div class="modal-header">
-            <h4 class="modal-title" id="realms-op-title"></h4>
-          </div>
-          <div class="modal-body">
-            <div id="realms-op-fields">
-              <table class="cockpit-form-table" id="realms-op-form">
-                <tr class="realms-op-join-only-row">
-                  <td translatable="yes">Domain Address</td>
-                  <td>
-                    <input class="realms-op-field form-control" type="text"
-                           id="realms-op-address" value=""/>
-                  </td>
-                  <td style="width:0px">
-                    <div id="realms-op-address-spinner"
-                         class="waiting"
-                         style="margin-left:-40px;margin-top:4px"></div>
-                    <img id="realms-op-address-error"
-                         src="images/dialog-error.png"
-                         style="margin-left:-40px;margin-top:4px"/>
-                  </td>
-                </tr>
-                <tr class="realms-op-join-only-row">
-                  <td class="header"></td>
-                </tr>
-                <tr class="realms-op-join-only-row">
-                  <td translatable="yes">Computer OU</td>
-                  <td>
-                    <input class="realms-op-field form-control" type="text"
-                           id="realms-op-computer-ou" value=""/>
-                  </td>
-                </tr>
-                <tr class="realms-op-join-only-row" id="realms-op-software-row">
-                  <td translatable="yes">Software</td>
-                  <td>
-                    <select class="form-control" id="realms-op-software">
-                    </select>
-                  </td>
-                </tr>
-                <tr id="realms-authentification-row">
-                  <td translatable="yes">Authentication</td>
-                  <td>
-                    <select class="form-control" id="realms-op-auth">
-                    </select>
-                  </td>
-                </tr>
-                <tr id="realms-op-user-row">
-                  <td translatable="yes">User Name</td>
-                  <td>
-                    <input class="realms-op-field form-control" type="text"
-                           id="realms-op-user" value=""/>
-                  </td>
-                </tr>
-                <tr id="realms-op-user-password-row">
-                  <td translatable="yes">User Password</td>
-                  <td>
-                    <input class="realms-op-field form-control" type="password"
-                           id="realms-op-user-password" value=""/>
-                  </td>
-                </tr>
-                <tr id="realms-op-admin-row">
-                  <td translatable="yes">Domain Administrator Name</td>
-                  <td>
-                    <input class="realms-op-field form-control" type="text"
-                           id="realms-op-admin" value=""/>
-                  </td>
-                </tr>
-                <tr id="realms-op-admin-password-row">
-                  <td translatable="yes">Domain Administrator Password</td>
-                  <td>
-                    <input class="realms-op-field form-control" type="password"
-                           id="realms-op-admin-password" value=""/>
-                  </td>
-                </tr>
-                <tr id="realms-op-otp-row">
-                  <td translatable="yes">One Time Password</td>
-                  <td>
-                    <input class="realms-op-field form-control" type="password"
-                           id="realms-op-ot-password" value=""/>
-                  </td>
-                </tr>
-                <tr style="height:50px">
-                  <td colspan="3">
-                    <div id="realms-op-error"
-                         style="text-align:left;font-weight:bold"></div>
-                    <pre id="realms-op-diagnostics"
-                         style="text-align:left; display: none;">
-                    </pre>
-                  </td>
-                </tr>
-              </table>
-            </div>
-          </div>
-          <div class="modal-footer">
-            <div id="realms-op-spinner" class="waiting" style="float: left"></div>
-            <span id="realms-op-wait-message">This may take a while</span>
-            <button class="btn btn-default" id="realms-op-cancel">
-              Cancel
-            </button>
-            <button class="btn btn-primary" id="realms-op-apply">
-              Next
-            </button>
-          </div>
-        </div>
-      </div>
-    </div>
 
     <div class="modal" id="accounts-create-dialog"
          tabindex="-1" role="dialog"
@@ -1216,17 +1114,20 @@
           <div class="modal-body">
             <table class="cockpit-form-table">
               <tr>
-                <td translatable="yes">Real Name</td>
+                <td><label class="control-label" for="accounts-create-real-name"
+                           translatable="yes">Full Name</label></td>
                 <td><input class="form-control" type="text"
                            id="accounts-create-real-name" value=""/></td>
               </tr>
               <tr>
-                <td translatable="yes">User Name</td>
+                <td><label class="control-label" for="accounts-create-user-name"
+                           translatable="yes">User Name</td>
                 <td><input class="form-control" type="text"
                            id="accounts-create-user-name" value=""/></td>
               </tr>
               <tr>
-                <td translatable="yes">Password</td>
+                <td><label class="control-label" for="accounts-create-pw1"
+                           translatable="yes">Password</label></td>
                 <td>
                   <div class="check-passwords">
                     <input class="form-control" type="password"
@@ -1235,24 +1136,28 @@
                 </td>
               </tr>
               <tr>
-                <td translatable="yes">Confirm</td>
+                <td class="top">
+                    <label class="control-label" for="accounts-create-pw2"
+                           translatable="yes">Confirm</label>
+                </td>
                 <td>
-                  <div class="check-passwords">
+                  <div class="check-passwords dialog-wrapper">
                     <input class="form-control" type="password"
                            id="accounts-create-pw2" value=""/>
+                    <div id="accounts-create-password-meter" class="progress password-strength-meter">
+                      <div class="progress-bar"></div>
+                      <div class="progress-bar"></div>
+                      <div class="progress-bar"></div>
+                      <div class="progress-bar"></div>
+                    </div>
+                    <div>
+                        <span id="accounts-create-password-meter-message" class="help-block"></span>
+                    </div>
                   </div>
                 </td>
               </tr>
               <tr>
-                <td></td>
-                <td>
-                  <div id="accounts-create-message-password-mismatch" class="has-error">
-                    <span class="help-block">The passwords do not match</span>
-                  </div>
-                </td>
-              </tr>
-              <tr>
-                <td>Access</td>
+                <td><label class="control-label" translatable="yes">Access</label></td>
                 <td>
                   <div>
                     <label>
@@ -1287,7 +1192,18 @@
           <div class="modal-body">
             <table class="cockpit-form-table">
               <tr>
-                <td translatable="yes">New Password</td>
+                <td><label class="control-label" for="account-set-password-old"
+                           translatable="yes">Old Password</label></td>
+                <td>
+                  <div class="check-passwords">
+                    <input class="form-control" type="password"
+                           id="account-set-password-old"/>
+                  </div>
+                </td>
+              </tr>
+              <tr>
+                <td><label class="control-label" for="account-set-password-pw1"
+                           translatable="yes">New Password</label></td>
                 <td>
                   <div class="check-passwords">
                     <input class="form-control" type="password"
@@ -1296,19 +1212,25 @@
                 </td>
               </tr>
               <tr>
-                <td translatable="yes">Confirm New Password</td>
+                <td class="top">
+                    <label class="control-label" for="account-set-password-pw2"
+                           translatable="yes">Confirm New Password</label>
+                </td>
                 <td>
-                  <div class="check-passwords">
+                  <div class="check-passwords dialog-wrapper">
                     <input class="form-control" type="password"
                            id="account-set-password-pw2" value=""/>
+                    <div id="account-set-password-meter" class="progress password-strength-meter">
+                      <div class="progress-bar"></div>
+                      <div class="progress-bar"></div>
+                      <div class="progress-bar"></div>
+                      <div class="progress-bar"></div>
+                    </div>
+                    <div>
+                        <span id="account-set-password-meter-message" class="help-block" hidden></span>
+                    </div>
                   </div>
                 </td>
-              </tr>
-              <tr>
-                <td></td>
-                <td><div id="account-set-password-message-password-mismatch" class="has-error">
-                    <span class="help-block">The passwords do not match</span>
-                </div></td>
               </tr>
             </table>
           </div>
@@ -1409,13 +1331,13 @@
           <div class="modal-body">
             <table class="cockpit-form-table">
               <tr>
-                <td translatable="yes">Name</td>
+                  <td><label class="control-label" for="create-raid-name" translatable="yes">Name</label></td>
                 <td>
                   <input class="form-control" id="create-raid-name" type="text">
                 </td>
               </tr>
               <tr>
-                <td translatable="yes">RAID Level</td>
+                <td><label class="control-label" for="create-raid-level" translatable="yes">RAID Level</label></td>
                 <td>
                   <select class="form-control selectpicker" id="create-raid-level">
                     <option translatable="yes" value="raid0">RAID 0 (Stripe)</option>
@@ -1428,7 +1350,8 @@
                 </td>
               </tr>
               <tr>
-                <td translatable="yes">Chunk Size</td>
+                <td><label class="control-label" for="create-raid-chunk"
+                           translatable="yes">Chunk Size</label></td>
                 <td>
                   <select class="form-control selectpicker" id="create-raid-chunk">
                     <option translatable="yes" value="4">4 KB</option>
@@ -1444,17 +1367,19 @@
                 </td>
               </tr>
               <tr>
-                <td class="top" translatable="yes">Disks</td>
+                <td class="top">
+                    <label class="control-label" translatable="yes">Disks</label>
+                </td>
                 <td id="create-raid-drives">
                 </td>
               </tr>
               <tr>
-                <td translatable="yes">Number of Disks</td>
+                <td><label class="control-label" translatable="yes">Number of Disks</label></td>
                 <td id="create-raid-summary-drives">
                 </td>
               </tr>
               <tr>
-                <td translatable="yes">Usable Size</td>
+                <td><label class="control-label" translatable="yes">Usable Size</label></td>
                 <td id="create-raid-summary-size">
                 </td>
               </tr>
@@ -1481,25 +1406,25 @@
             <h4 class="modal-title">Create Volume Group</h4>
           </div>
           <div class="modal-body">
+            <div class="alert alert-warning alert-dismissable" style="display: none;" id="disks-not-found">
+              <span class="pficon-layered" style="float: left; font-size: 200%;">
+                <span class="pficon pficon-warning-triangle"></span>
+                <span class="pficon pficon-warning-exclamation"></span>
+              </span>
+              <button type="button" class="close" aria-hidden="true">&times;</button>
+              <strong>Warning!</strong> <span class="alert-message"></span>
+            </div>
             <table class="cockpit-form-table">
               <tr>
-                <div class="alert alert-warning alert-dismissable" style="display: none;" id="disks-not-found">
-                  <span class="pficon-layered" style="float: left; font-size: 200%;">
-                    <span class="pficon pficon-warning-triangle"></span>
-                    <span class="pficon pficon-warning-exclamation"></span>
-                  </span>
-                  <button type="button" class="close" aria-hidden="true">&times;</button>
-                  <strong>Warning!</strong> <span class="alert-message"></span>
-                </div>
-              </tr>
-              <tr>
-                <td translatable="yes">Name</td>
+                <td><label class="control-label" for="create-vg-name" translatable="yes">Name</label></td>
                 <td id="creat-vg-name-cell">
                   <input class="form-control" id="create-vg-name" type="text">
                 </td>
               </tr>
               <tr>
-                <td class="top" translatable="yes">Disks</td>
+                <td class="top">
+                  <label class="control-label" translatable="yes">Disks</label>
+                </td>
                 <td id="create-vg-drives">
                 </td>
               </tr>
@@ -1534,7 +1459,7 @@
           <div class="modal-body">
             <table class="cockpit-form-table">
               <tr>
-                <td translatable="yes">Erase</td>
+                <td><label class="control-label" for="format-disk-erase" translatable="yes">Erase</label></td>
                 <td>
                   <select class="form-control selectpicker" id="format-disk-erase">
                     <option translatable="yes" value="no">Don't
@@ -1546,7 +1471,8 @@
                 </td>
               </tr>
               <tr>
-                <td translatable="yes">Partitioning</td>
+                <td><label class="control-label" for="format-disk-type"
+                           translatable="yes">Partitioning</label></td>
                 <td>
                   <select class="form-control selectpicker" id="format-disk-type">
                     <option translatable="yes"
@@ -1586,13 +1512,13 @@
           <div class="modal-body">
             <table class="cockpit-form-table">
               <tr id="format-size-row">
-                <td translatable="yes">Size (MB)</td>
+                <td><label class="control-label" for="format-size" translatable="yes">Size (MB)</label></td>
                 <td>
                   <input class="form-control" type="text" id="format-size">
                 </td>
               </tr>
               <tr>
-                <td translatable="yes">Erase</td>
+                <td><label class="control-label" for="format-erase" translatable="yes">Erase</label></td>
                 <td>
                   <select class="form-control selectpicker" id="format-erase">
                     <option translatable="yes" value="no">Don't
@@ -1604,7 +1530,7 @@
                 </td>
               </tr>
               <tr>
-                <td translatable="yes">Type</td>
+                <td><label class="control-label" for="format-type" translatable="yes">Type</label></td>
                 <td>
                   <select class="form-control selectpicker" id="format-type">
                     <option translatable="yes" value="xfs">XFS - Red
@@ -1628,25 +1554,26 @@
                 </td>
               </tr>
               <tr id="format-name-row">
-                <td translatable="yes">Name</td>
+                <td><label class="control-label" for="format-name" translatable="yes">Name</label></td>
                 <td>
                   <input class="form-control" type="text" id="format-name">
                 </td>
               </tr>
               <tr id="format-custom-row">
-                <td translatable="yes">Filesystem</td>
+                <td><label class="control-label" for="format-custom" translatable="yes">Filesystem</label></td>
                 <td>
                   <input class="form-control" type="text" id="format-custom">
                 </td>
               </tr>
               <tr id="format-passphrase-row">
-                <td translatable="yes">Passphrase</td>
+                <td><label class="control-label" for="format-passphrase" translatable="yes">Passphrase</label></td>
                 <td>
                   <input class="form-control" type="password" id="format-passphrase">
                 </td>
               </tr>
               <tr id="format-passphrase-row-2">
-                <td translatable="yes">Confirm Passphrase</td>
+                <td><label class="control-label" for="format-passphrase-2"
+                           translatable="yes">Confirm Passphrase</label></td>
                 <td>
                   <input class="form-control" type="password" id="format-passphrase-2">
                 </td>
@@ -1663,13 +1590,15 @@
                 </td>
               </tr>
               <tr id="format-crypto-options-row">
-                <td translatable="yes">Encryption Options</td>
+                <td><label class="control-label" for="format-crypto-options"
+                           translatable="yes">Encryption Options</label></td>
                 <td>
                   <input class="form-control" type="text" id="format-crypto-options">
                 </td>
               </tr>
               <tr id="format-mounting-row">
-                <td>Mounting</td>
+                <td><label class="control-label" for="format-mounting"
+                           translatable="yes">Mounting</label></td>
                 <td>
                   <select class="form-control selectpicker" id="format-mounting">
                     <option translatable="yes" value="default">Default</option>
@@ -1678,13 +1607,15 @@
                 </td>
               </tr>
               <tr id="format-mount-point-row">
-                <td translatable="yes">Mount Point</td>
+                <td><label class="control-label" for="format-mount-point"
+                           translatable="yes">Mount Point</label></td>
                 <td>
                   <input class="form-control" type="text" id="format-mount-point">
                 </td>
               </tr>
               <tr id="format-mount-options-row">
-                <td translatable="yes">Mount Options</td>
+                <td><label class="control-label" for="format-mount-options"
+                           translatable="yes">Mount Options</label></td>
                 <td>
                   <input class="form-control" type="text" id="format-mount-options">
                 </td>
@@ -1715,13 +1646,15 @@
           <div class="modal-body">
             <table class="cockpit-form-table">
               <tr>
-                <td translatable="yes">Name</td>
+                <td><label class="control-label" for="fsysopts-name"
+                           translatable="yes">Name</label></td>
                 <td>
                   <input class="form-control" type="text" id="fsysopts-name">
                 </td>
               </tr>
               <tr>
-                <td>Mounting</td>
+                <td><label class="control-label" for="fsysopts-mounting"
+                           translatable="yes">Mounting</label></td>
                 <td>
                   <select class="form-control selectpicker" id="fsysopts-mounting">
                     <option translatable="yes" value="default">Default</option>
@@ -1730,13 +1663,15 @@
                 </td>
               </tr>
               <tr id="fsysopts-mount-point-row">
-                <td translatable="yes">Mount Point</td>
+                <td><label class="control-label" for="fsysopts-mount-point"
+                        translatable="yes">Mount Point</label></td>
                 <td>
                   <input class="form-control" type="text" id="fsysopts-mount-point">
                 </td>
               </tr>
               <tr id="fsysopts-mount-options-row">
-                <td translatable="yes">Mount Options</td>
+                <td><label class="control-label" for="fsysopts-mount-options"
+                        translatable="yes">Mount Options</label></td>
                 <td>
                   <input class="form-control" type="text" id="fsysopts-mount-options">
                 </td>
@@ -1764,6 +1699,14 @@
             <h4 class="modal-title">Add Disk</h4>
           </div>
           <div class="modal-body">
+            <div class="alert alert-warning alert-dismissable hide" id="vg-disks-not-found">
+              <span class="pficon-layered" style="float: left; font-size: 200%;">
+                <span class="pficon pficon-warning-triangle"></span>
+                <span class="pficon pficon-warning-exclamation"></span>
+              </span>
+              <button type="button" class="close" aria-hidden="true">&times;</button>
+              <strong translatable="yes">Warning!</strong> <span class="alert-message"></span>
+            </div>
             <div id="vg-disk-add-drives">
             </div>
           </div>
@@ -1790,13 +1733,15 @@
           <div class="modal-body">
             <table class="cockpit-form-table">
               <tr>
-                <td translatable="yes">Name</td>
+                <td><label class="control-label" for="create-pvol-name"
+                        translatable="yes">Name</label></td>
                 <td>
                   <input class="form-control" type="text" id="create-pvol-name"/>
                 </td>
               </tr>
               <tr>
-                <td translatable="yes">Size (MB)</td>
+                <td><label class="control-label" for="create-pvol-size"
+                        translatable="yes">Size (MB)</label></td>
                 <td>
                   <input class="form-control" type="text" id="create-pvol-size"/>
                 </td>
@@ -1826,13 +1771,15 @@
           <div class="modal-body">
             <table class="cockpit-form-table">
               <tr>
-                <td translatable="yes">Name</td>
+                <td><label class="control-label" for="create-tpool-name"
+                        translatable="yes">Name</label></td>
                 <td>
                   <input class="form-control" type="text" id="create-tpool-name"/>
                 </td>
               </tr>
               <tr>
-                <td translatable="yes">Size (MB)</td>
+                <td><label class="control-label" for="create-tpool-size"
+                        translatable="yes">Size (MB)</label></td>
                 <td>
                   <input class="form-control" type="text" id="create-tpool-size"/>
                 </td>
@@ -1862,13 +1809,15 @@
           <div class="modal-body">
             <table style="width:100%" class="cockpit-form-table">
               <tr>
-                <td translatable="yes">Name</td>
+                <td><label class="control-label" for="create-tvol-name"
+                        translatable="yes">Name</label></td>
                 <td>
                   <input class="form-control" type="text" id="create-tvol-name"/>
                 </td>
               </tr>
               <tr>
-                <td translatable="yes">Size (MB)</td>
+                <td><label class="control-label" for="create-tvol-size"
+                        translatable="yes">Size (MB)</label></td>
                 <td>
                   <input class="form-control" type="text" id="create-tvol-size"/>
                 </td>
@@ -1898,13 +1847,15 @@
           <div class="modal-body">
             <table style="width:100%" class="cockpit-form-table">
               <tr>
-                <td translatable="yes">Name</td>
+                <td><label class="control-label" for="create-svol-name"
+                        translatable="yes">Name</label></td>
                 <td>
                   <input class="form-control" type="text" id="create-svol-name"/>
                 </td>
               </tr>
               <tr id="create-svol-size-row">
-                <td translatable="yes">Size (MB)</td>
+                <td><label class="control-label" for="create-svol-size"
+                        translatable="yes">Size (MB)</label></td>
                 <td>
                   <input class="form-control" type="text" id="create-svol-size"/>
                 </td>
@@ -1934,13 +1885,15 @@
           <div class="modal-body">
             <table class="cockpit-form-table">
               <tr>
-                <td translatable="yes">New Size (MB)</td>
+                <td><label class="control-label" for="resize-lvol-size"
+                        translatable="yes">New Size (MB)</label></td>
                 <td>
                   <input class="form-control" type="text" id="resize-lvol-size"/>
                 </td>
               </tr>
               <tr>
-                <td translatable="yes">Options</td>
+                <td><label class="control-label" for="resize-lvol-resize-fsys"
+                        translatable="yes">Options</label></td>
                 <td>
                   <label>
                     <input type="checkbox" id="resize-lvol-resize-fsys"/>
@@ -1973,7 +1926,8 @@
           <div class="modal-body">
             <table class="cockpit-form-table">
               <tr>
-                <td translatable="yes">New Name</td>
+                <td><label class="control-label" for="rename-lvol-name"
+                        translatable="yes">New Name</label></td>
                 <td>
                   <input class="form-control" type="text" id="rename-lvol-name"/>
                 </td>
@@ -2003,7 +1957,8 @@
           <div class="modal-body">
             <table class="cockpit-form-table">
               <tr>
-                <td translatable="yes">New Name</td>
+                <td><label class="control-label" for="rename-vg-name"
+                        translatable="yes">New Name</label></td>
                 <td>
                   <input class="form-control" type="text" id="rename-vg-name"/>
                 </td>
@@ -2033,13 +1988,15 @@
           <div class="modal-body">
             <table class="cockpit-form-table">
               <tr>
-                <td translatable="yes">Stored Passphrase</td>
+                <td><label class="control-label" for="crypto-options-passphrase"
+                        translatable="yes">Stored Passphrase</label></td>
                 <td>
                   <input class="form-control" type="password" id="crypto-options-passphrase">
                 </td>
               </tr>
               <tr>
-                <td translatable="yes">Options</td>
+                <td><label class="control-label" for="crypto-options-options"
+                        translatable="yes">Options</label></td>
                 <td>
                   <input class="form-control" type="text" id="crypto-options-options">
                 </td>
@@ -2069,7 +2026,8 @@
           <div class="modal-body">
             <table class="cockpit-form-table">
               <tr>
-                <td translatable="yes">Passphrase</td>
+                <td><label class="control-label" for="unlock-passphrase"
+                        translatable="yes">Passphrase</label></td>
                 <td>
                   <input class="form-control" type="password" id="unlock-passphrase">
                 </td>
@@ -2172,19 +2130,22 @@
           <div class="modal-body">
             <table class="cockpit-form-table">
               <tr>
-                <td translatable="yes">Image</td>
+                <td><label class="control-label"
+                        translatable="yes">Image</label></td>
                 <td colspan="3">
                   <span id="containers-run-image"/>
                 </td>
               </tr>
               <tr>
-                <td translatable="yes">Container Name</td>
+                <td><label class="control-label" for="containers-run-image-name"
+                        translatable="yes">Container Name</label></td>
                 <td colspan="3">
                   <input class="form-control" type="text" id="containers-run-image-name"/>
                 </td>
               </tr>
               <tr>
-                <td translatable="yes">Command</td>
+                <td><label class="control-label" for="containers-run-image-command"
+                        translatable="yes">Command</label></td>
                 <td colspan="3">
                   <input class="form-control" type="text" id="containers-run-image-command"/>
                   <div id="containers-run-image-command-note" hidden>
@@ -2195,7 +2156,7 @@
                 </td>
               </tr>
               <tr id="containers-run-image-memory">
-                <td translatable="yes">Memory limit</td>
+                <td><label class="control-label" translatable="yes">Memory limit</label></td>
                 <td class="shrink">
                   <input type="checkbox" />
                 </td>
@@ -2211,7 +2172,7 @@
                 </td>
               </tr>
               <tr id="containers-run-image-cpu">
-                <td translatable="yes">CPU priority</td>
+                <td><label class="control-label" translatable="yes">CPU priority</label></td>
                 <td class="shrink">
                   <input type="checkbox" />
                 </td>
@@ -2227,13 +2188,15 @@
                 </td>
               </tr>
               <tr>
-                <td translatable="yes">With terminal</td>
+                <td><label class="control-label" for="containers-run-image-with-terminal"
+                        translatable="yes">With terminal</label></td>
                 <td class="shrink">
                   <input type="checkbox" id="containers-run-image-with-terminal" checked />
                 </td>
               </tr>
               <tr>
-                <td translatable="yes">Links</td>
+                <td><label class="control-label" for="link-containers"
+                        translatable="yes">Links</td>
                 <td colspan="3">
                   <input type="checkbox" name="link-containers" id="link-containers" checked="false"/><label for="link-containers">Link to another container</label>
                   <div id="select-linked-containers" class="containers-run-inline">
@@ -2241,7 +2204,8 @@
                 </td>
               </tr>
               <tr>
-                <td translatable="yes">Ports</td>
+                <td><label class="control-label" for="expose-ports"
+                        translatable="yes">Ports</label></td>
                 <td colspan="3">
                   <input type="checkbox" name="expose-ports" id="expose-ports" checked="false"/><label for="expose-ports">Expose container ports</label>
                   <div id="select-exposed-ports" class="containers-run-portmapping containers-run-inline">
@@ -2272,7 +2236,11 @@
             <h4 class="modal-title">Image Search</h4>
           </div>
           <div class="modal-body">
-            <input type="search" class="form-control" id="containers-search-image-search"/>
+            <div class="form-group has-feedback">
+              <input type="search" class="form-control" id="containers-search-image-search"/>
+              <span class="fa fa-search form-control-feedback containers-search-image-search-icon"></span>
+            </div>
+            
             <div id="containers-search-image-waiting"></div>
             <div id="containers-search-image-results">
               <table class="table table-hover">
@@ -2306,13 +2274,13 @@
           <div class="modal-body">
             <table class="cockpit-form-table">
               <tr>
-                <td translatable="yes">Container Name</td>
+                <td><label class="control-label" translatable="yes">Container Name</label></td>
                 <td colspan="3">
                   <span class="container-name"></span>
                 </td>
               </tr>
               <tr class="memory-slider">
-                <td translatable="yes">Memory limit</td>
+                <td><label class="control-label" translatable="yes">Memory limit</label></td>
                 <td class="shrink">
                   <input type="checkbox" />
                 </td>
@@ -2328,7 +2296,7 @@
                 </td>
               </tr>
               <tr class="cpu-slider">
-                <td translatable="yes">CPU priority</td>
+                <td><label class="control-label" translatable="yes">CPU priority</label></td>
                 <td class="shrink">
                   <input type="checkbox" />
                 </td>
@@ -2368,31 +2336,31 @@
           <div class="modal-body">
             <table class="cockpit-form-table">
               <tr>
-                <td translatable="yes">Container Name</td>
+                <td><label class="control-label" translatable="yes">Container Name</label></td>
                 <td colspan="3">
                   <span class="container-name"/>
                 </td>
               </tr>
               <tr>
-                <td translatable="yes">Repository</td>
+                  <td><label class="control-label" translatable="yes">Repository</label></td>
                 <td colspan="3">
                   <input class="form-control container-repository" type="text"/>
                 </td>
               </tr>
               <tr>
-                <td translatable="yes">Tag</td>
+                <td><label class="control-label" translatable="yes">Tag</label></td>
                 <td colspan="3">
                   <input class="form-control container-tag" type="text"/>
                 </td>
               </tr>
               <tr>
-                <td translatable="yes">Author</td>
+                <td><label class="control-label" translatable="yes">Author</label></td>
                 <td colspan="3">
                   <input class="form-control container-author" type="text"/>
                 </td>
               </tr>
               <tr>
-                <td translatable="yes">Command</td>
+                <td><label class="control-label" translatable="yes">Command</label></td>
                 <td colspan="3">
                   <input class="form-control container-command" type="text"/>
                 </td>
@@ -2467,44 +2435,6 @@
             </button>
             <button class="btn btn-primary" translatable="yes" id="network-ip-settings-apply">
               Apply
-            </button>
-          </div>
-        </div>
-      </div>
-    </div>
-
-    <div class="modal" id="service-add-dialog"
-         tabindex="-1" role="dialog"
-         data-backdrop="static">
-      <div class="modal-dialog">
-        <div class="modal-content">
-          <div class="modal-header">
-            <h4 class="modal-title">Add Service</h4>
-          </div>
-          <div class="modal-body">
-            <ul class="list-group" id="service-add-images">
-            </ul>
-            <table class="cockpit-form-table">
-              <tr>
-                <td translatable="yes">Image</td>
-                <td>
-                  <input class="form-control" id="service-add-image">
-                </td>
-              </tr>
-              <tr>
-                <td translatable="yes">Name</td>
-                <td>
-                  <input class="form-control" id="service-add-name">
-                </td>
-              </tr>
-            </table>
-          </div>
-          <div class="modal-footer">
-            <button class="btn btn-default" translatable="yes" data-dismiss="modal">
-              Cancel
-            </button>
-            <button class="btn btn-primary" translatable="yes" id="service-add-add">
-              Add
             </button>
           </div>
         </div>

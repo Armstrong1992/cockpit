@@ -6,9 +6,10 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <base href="/cockpit/@@base@@/shell/index.html">
     <link href="../base1/cockpit.css" rel="stylesheet">
+    <link href="../../static/branding.css" rel="stylesheet">
     <link href="shell.css" rel="stylesheet">
-    <script src="../base1/cockpit.js"></script>
-    <script src="index.js"></script>
+    <script src="../base1/bundle.js"></script>
+    <script src="bundle.js"></script>
   </head>
   <body style="overflow: hidden;">
     <nav id="topnav" class="navbar navbar-default navbar-pf" role="navigation" hidden>
@@ -19,7 +20,7 @@
           <span class="icon-bar"></span>
           <span class="icon-bar"></span>
         </button>
-        <img class="navbar-brand" height="25" src="/static/images/brand.v0.png" alt="Cockpit" />
+        <img class="navbar-brand" height="25" src="../../static/brand.png" alt="Cockpit" />
       </div>
       <div class="collapse navbar-collapse navbar-collapse-1">
         <ul class="nav navbar-nav navbar-utility">
@@ -75,13 +76,17 @@
           </div>
           <div class="modal-body">
             <div translatable="yes">
-              Cockpit is an advanced application with many options.
+              Cockpit is an interactive Linux server admin interface.
+            </div>
+            <div translatable="yes">
+              <a target="_blank" href="http://cockpit-project.org/">Project website</a>
             </div>
             <div>
               <span translatable="yes">Version</span> <span id="about-version"></span>.
             </div>
-            <div>
-              <span id="about-build-info"></span>.
+            <div translatable="yes">
+              Licensed under the <a href="https://www.gnu.org/licenses/old-licenses/lgpl-2.1-standalone.html"
+                  target="_blank">GNU LGPL version 2.1</a>
             </div>
           </div>
           <div class="modal-footer">
@@ -160,14 +165,34 @@
         <ul id="sidebar-menu" class="nav nav-pills nav-stacked">
         </ul>
       </div>
-      <div class="nav-category">
-        <ul id="sidebar-tools" class="nav nav-pills nav-stacked">
-        </ul>
+      <div id="tools-menu" class="panel-group">
+        <div class="panel panel-default">
+          <div class="panel-heading">
+            <h4 class="panel-title">
+              <a data-toggle="collapse" href="/@localhost/#tools-panel" class="collapsed" translatable="yes">
+                Tools
+              </a>
+            </h4>
+          </div>
+          <div style="height: 0px;" id="tools-panel" class="panel-collapse collapse">
+            <div class="panel-body">
+              <ul id="sidebar-tools" class="nav nav-pills nav-stacked">
+              </ul>
+            </div>
+          </div>
+        </div>
       </div>
     </div>
 
     <div id="content">
     </div>
 
+    <script>
+        require([
+            "shell/index"
+        ], function(index) {
+            /* index starts automatically when required */
+        });
+    </script>
   </body>
 </html>

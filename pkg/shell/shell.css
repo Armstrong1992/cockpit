@@ -19,17 +19,10 @@
 
 /* ---------------------------------------------------------------------------------------------------- */
 
-@import url(../legacy/cockpit.css);
-
 /* Hacks on top for now */
 
 html, body {
     height: 100%;
-}
-
-/* Grow the delete icon a bit in order to make it render better */
-.btn-delete.pficon-delete {
-    font-size: 14px;
 }
 
 #dashboard-add {
@@ -65,6 +58,11 @@ html, body {
     padding: 8px;
     float: right;
     margin-left: 10px;
+}
+
+#dashboard-hosts button.btn.pficon {
+    padding-top: 5px;
+    font-size: 14px;
 }
 
 /* Per server buttons not visible by default */
@@ -105,7 +103,19 @@ html, body {
     white-space: nowrap;
 }
 
-#dashboard-plot {
+.zoom-controls {
+    display: none;
+}
+
+.show-zoom-controls .zoom-controls {
+    display: block;
+}
+
+.show-zoom-cursor .zoomable-plot {
+    cursor: ew-resize;
+}
+
+.dashboard-plot {
     margin-bottom: 10px;
 }
 
@@ -133,6 +143,16 @@ html, body {
     width: 70px;
 }
 
+/* Make the error and success icons in setup the right size and color */
+
+.cockpit-setup-task-table .cockpit-setup-task-error {
+    color: #af151a;
+    font-size: 18px;
+}
+
+.cockpit-setup-task-table .cockpit-setup-task-done {
+    font-size: 18px;
+}
 
 /* Style a button group */
 
@@ -214,6 +234,10 @@ html, body {
     border-radius: 5px;
 }
 
+.server-graph .flot-y-axis .flot-tick-label {
+    margin-right: 5px;
+}
+
 .available-disks-group input[type='checkbox'],
 .available-interfaces-group input[type='checkbox'] {
     margin: 4px 4px 4px -20px;
@@ -227,11 +251,6 @@ html, body {
 
 ul.available-interfaces-group {
     margin-bottom: 0px;
-}
-
-.server-graph:hover {
-    cursor: pointer;
-    background-color: #d4edfa;
 }
 
 .cockpit-account {
@@ -253,6 +272,8 @@ ul.available-interfaces-group {
 .cockpit-account > .cockpit-account-pic {
     width: 48px;
     height: 48px;
+    font-size: 48px;
+    color: #bebebe;
     margin: 10px;
     float: left;
 }
@@ -263,6 +284,7 @@ ul.available-interfaces-group {
     overflow: hidden;
     white-space: nowrap;
     text-overflow: ellipsis;
+    min-height: 30px;
 }
 
 .cockpit-account > .cockpit-account-user-name {
@@ -496,8 +518,36 @@ ul.available-interfaces-group {
 }
 
 /* server overview dashboard */
+#server .cockpit-info-table button {
+  max-width: 300px;
+}
+
 #server .cockpit-info-table td:first-child {
-    width: 50%;
+    max-width: 50%
+}
+
+#server .cockpit-info-table {
+    width: 100%;
+}
+
+@media (min-width: 992px) {
+    #server .cockpit-info-table {
+        table-layout: fixed;
+        width: 100%;
+        min-width: 220px;
+    }
+
+  /* server overview dashboard */
+  #server .cockpit-info-table-container td button {
+      max-width: 100%;
+  }
+}
+
+@media (max-width: 480px) {
+  /* server overview dashboard */
+  #server .cockpit-info-table-container td button {
+      max-width: 200px;
+  }
 }
 
 #containers-search-image-dialog .modal-body {
@@ -516,11 +566,15 @@ ul.available-interfaces-group {
 }
 
 #containers-search-image-search {
-    background: url("images/search-icon.png") no-repeat 3px;
-    padding-left: 20px;
+    padding-left: 25px;
 }
 
-#containers-search-image-waiting.waiting {
+#containers-search-image-dialog .containers-search-image-search-icon {
+    left: 0;
+    top: 0;
+}
+
+#containers-search-image-waiting.spinner {
     margin: auto;
     margin-top: 150px;
 }
@@ -579,7 +633,7 @@ ul.available-interfaces-group {
 .containers-run-inline form .fa-plus {
     height: 26px;
     width: 26px;
-    padding: 8px;
+    padding: 4px;
     float: right;
     margin-left: 5px;
 }
@@ -622,7 +676,7 @@ ul.available-interfaces-group {
       width: 40%;
   }
   #select-linked-containers input {
-      max-width: 75%;
+      max-width: 73%;
   }
 }
 
@@ -645,13 +699,6 @@ ul.available-interfaces-group {
 .network-ip-settings-row:last-of-type {
     border-bottom: none;
     padding-bottom: 0;
-}
-
-/* Realms */
-
-#realms-op-wait-message {
-    float: left;
-    margin-top: 3px;
 }
 
 /* System information */
@@ -819,6 +866,12 @@ ul.available-interfaces-group {
     border-left: 7px solid #BABABA;
 }
 
+#machine-dropdown .dropdown-menu li a {
+    max-width: 201px;
+    text-overflow: ellipsis;
+    overflow: hidden;
+}
+
 #machine-link {
     padding: 9px;
     padding-left: 15px;
@@ -829,7 +882,11 @@ ul.available-interfaces-group {
 
 #machine-link span {
     display: inline-block;
-    min-width: 130px;
+    width: 130px;
+    text-overflow: ellipsis;
+    overflow: hidden;
+    white-space: nowrap;
+    vertical-align: middle;
 }
 
 .machine-avatar {
@@ -845,7 +902,52 @@ ul.available-interfaces-group {
     padding: 0 20px;
 }
 
+.nopadding {
+   padding: 0;
+}
+
+.nomargin {
+   margin: 0;
+}
+
 iframe.container-frame {
     display: block;
     border: none;
+}
+
+/* Otherwise the datepicker is confused when in a modal */
+.datepicker-dropdown {
+    margin-top: 30px;
+}
+
+#sidebar > .nav-category {
+    padding-bottom: 5px;
+}
+
+#tools-menu > .panel {
+  border: none;
+  box-shadow: none;
+}
+
+#tools-menu > .panel > .panel-heading {
+  height: auto;
+  padding-left: 0px;
+  margin-left: 4px;
+  background: none;
+  border-bottom: none;
+}
+
+#tools-menu .panel-title a {
+  font-weight: normal;
+  font-size: 13px;
+  display: block;
+  color: #333;
+}
+
+#tools-panel > .panel-body {
+  border: none;
+}
+
+#sidebar-tools > li > a {
+  padding-left: 20px;
 }

@@ -27,6 +27,7 @@
 #include <gio/gunixinputstream.h>
 #include <gio/gunixoutputstream.h>
 
+#include "common/cockpitconf.h"
 #include "common/cockpitjson.h"
 #include "common/cockpitlog.h"
 #include "common/cockpitpipetransport.h"
@@ -244,7 +245,8 @@ cockpit_session_track (CockpitSessions *sessions,
 
   /* Always send an init message down the new transport */
   object = build_json ("command", "init", NULL);
-  json_object_set_int_member (object, "version", 0);
+  json_object_set_int_member (object, "version", 1);
+  json_object_set_string_member (object, "host", host);
   command = cockpit_json_write_bytes (object);
   json_object_unref (object);
 
@@ -528,6 +530,7 @@ struct _CockpitWebService {
   guint ping_timeout;
   gint callers;
   guint next_internal_id;
+  GHashTable *channel_groups;
 };
 
 typedef struct {
@@ -598,6 +601,7 @@ cockpit_web_service_finalize (GObject *object)
   cockpit_creds_unref (self->creds);
   if (self->ping_timeout)
     g_source_remove (self->ping_timeout);
+  g_hash_table_destroy (self->channel_groups);
 
   G_OBJECT_CLASS (cockpit_web_service_parent_class)->finalize (object);
 }
@@ -672,17 +676,19 @@ caller_end (CockpitWebService *self)
 
 static void
 outbound_protocol_error (CockpitWebService *self,
-                         CockpitTransport *transport)
+                         CockpitTransport *transport,
+                         const gchar *problem)
 {
-  cockpit_transport_close (transport, "protocol-error");
+  if (problem == NULL)
+    problem = "protocol-error";
+  cockpit_transport_close (transport, problem);
 }
 
 static gboolean
 process_close (CockpitWebService *self,
                CockpitSocket *socket,
                CockpitSession *session,
-               const gchar *channel,
-               JsonObject *options)
+               const gchar *channel)
 {
   CockpitSideband *sideband;
 
@@ -695,6 +701,83 @@ process_close (CockpitWebService *self,
     cockpit_session_remove_channel (&self->sessions, session, channel);
   if (socket)
     cockpit_socket_remove_channel (&self->sockets, socket, channel);
+  g_hash_table_remove (self->channel_groups, channel);
+
+  return TRUE;
+}
+
+static gboolean
+process_and_relay_close (CockpitWebService *self,
+                         CockpitSocket *socket,
+                         const gchar *channel,
+                         GBytes *payload)
+{
+  CockpitSession *session;
+  gboolean valid;
+
+  session = cockpit_session_by_channel (&self->sessions, channel);
+  valid = process_close (self, socket, session, channel);
+  if (valid && session && !session->sent_done)
+    cockpit_transport_send (session->transport, NULL, payload);
+
+  return valid;
+}
+
+static gboolean
+process_kill (CockpitWebService *self,
+              CockpitSocket *socket,
+              JsonObject *options)
+{
+  CockpitSession *session;
+  GHashTableIter iter;
+  gpointer channel;
+  const gchar *host;
+  const gchar *group;
+  GBytes *payload;
+  GList *list, *l;
+
+  if (!cockpit_json_get_string (options, "host", NULL, &host) ||
+      !cockpit_json_get_string (options, "group", NULL, &group))
+    {
+      g_warning ("%s: received invalid kill command", socket->id);
+      return FALSE;
+    }
+
+  list = NULL;
+  g_hash_table_iter_init (&iter, socket->channels);
+  while (g_hash_table_iter_next (&iter, &channel, NULL))
+    {
+      if (host)
+        {
+          session = cockpit_session_by_channel (&self->sessions, channel);
+          if (!session || !g_str_equal (host, session->host))
+            continue;
+        }
+      if (group)
+        {
+          if (g_strcmp0 (g_hash_table_lookup (self->channel_groups, channel), group) != 0)
+            continue;
+        }
+
+      list = g_list_prepend (list, g_strdup (channel));
+    }
+
+  for (l = list; l != NULL; l = g_list_next (l))
+    {
+      channel = l->data;
+
+      g_debug ("%s killing channel: %s", socket->id, (gchar *)channel);
+
+      /* Send a close message to both parties */
+      payload = build_control ("command", "close", "channel", (gchar *)channel, "problem", "terminated", NULL);
+      g_warn_if_fail (process_and_relay_close (self, socket, channel, payload));
+      web_socket_connection_send (socket->connection, WEB_SOCKET_DATA_TEXT, self->control_prefix, payload);
+      g_bytes_unref (payload);
+
+      g_free (channel);
+    }
+
+  g_list_free (list);
   return TRUE;
 }
 
@@ -771,7 +854,7 @@ out:
   return ret;
 }
 
-static gboolean
+static const gchar *
 process_session_init (CockpitWebService *self,
                       CockpitSession *session,
                       JsonObject *options)
@@ -780,9 +863,12 @@ process_session_init (CockpitWebService *self,
   gint64 version;
 
   if (!cockpit_json_get_int (options, "version", -1, &version))
-    version = -1;
+    {
+      g_warning ("invalid version field in init message");
+      return "protocol-error";
+    }
 
-  if (version == 0)
+  if (version == 1)
     {
       g_debug ("%s: received init message", session->host);
       session->init_received = TRUE;
@@ -791,7 +877,7 @@ process_session_init (CockpitWebService *self,
     {
       g_message ("%s: unsupported version of cockpit protocol: %" G_GINT64_FORMAT,
                  session->host, version);
-      return FALSE;
+      return "not-supported";
     }
 
   if (!cockpit_json_get_string (options, "checksum", NULL, &checksum))
@@ -800,7 +886,7 @@ process_session_init (CockpitWebService *self,
   g_free (session->checksum);
   session->checksum = g_strdup (checksum);
 
-  return TRUE;
+  return NULL;
 }
 
 static gboolean
@@ -811,6 +897,7 @@ on_session_control (CockpitTransport *transport,
                     GBytes *payload,
                     gpointer user_data)
 {
+  const gchar *problem = "protocol-error";
   CockpitWebService *self = user_data;
   CockpitSession *session = NULL;
   CockpitSocket *socket = NULL;
@@ -827,7 +914,8 @@ on_session_control (CockpitTransport *transport,
         }
       else if (g_strcmp0 (command, "init") == 0)
         {
-          valid = process_session_init (self, session, options);
+          problem = process_session_init (self, session, options);
+          valid = (problem == NULL);
         }
       else if (!session->init_received)
         {
@@ -875,7 +963,7 @@ on_session_control (CockpitTransport *transport,
         }
       else if (g_strcmp0 (command, "close") == 0)
         {
-          valid = process_close (self, socket, session, channel, options);
+          valid = process_close (self, socket, session, channel);
         }
       else
         {
@@ -895,7 +983,7 @@ on_session_control (CockpitTransport *transport,
 
   if (!valid)
     {
-      outbound_protocol_error (self, transport);
+      outbound_protocol_error (self, transport, problem);
     }
 
   return TRUE; /* handled */
@@ -928,7 +1016,7 @@ on_session_recv (CockpitTransport *transport,
   else if (session->transport != transport)
     {
       g_warning ("received message with wrong channel %s from session", channel);
-      outbound_protocol_error (self, transport);
+      outbound_protocol_error (self, transport, NULL);
       return FALSE;
     }
 
@@ -1031,6 +1119,7 @@ lookup_or_open_session_for_host (CockpitWebService *self,
 {
   CockpitSession *session = NULL;
   CockpitTransport *transport;
+  const gchar *hostname;
 
   if (host == NULL || g_strcmp0 (host, "") == 0)
     host = "localhost";
@@ -1040,14 +1129,15 @@ lookup_or_open_session_for_host (CockpitWebService *self,
   if (!session)
     {
       /* Used during testing */
+      hostname = host;
       if (g_strcmp0 (host, "localhost") == 0)
         {
           if (cockpit_ws_specific_ssh_port != 0)
-            host = "127.0.0.1";
+            hostname = "127.0.0.1";
         }
 
       transport = g_object_new (COCKPIT_TYPE_SSH_TRANSPORT,
-                                "host", host,
+                                "host", hostname,
                                 "port", cockpit_ws_specific_ssh_port,
                                 "command", cockpit_ws_bridge_program,
                                 "creds", creds,
@@ -1085,10 +1175,10 @@ parse_binary_type (JsonObject *options,
 }
 
 static gboolean
-process_open (CockpitWebService *self,
-              CockpitSocket *socket,
-              const gchar *channel,
-              JsonObject *options)
+process_and_relay_open (CockpitWebService *self,
+                        CockpitSocket *socket,
+                        const gchar *channel,
+                        JsonObject *options)
 {
   WebSocketDataType data_type = WEB_SOCKET_DATA_TEXT;
   CockpitSession *session = NULL;
@@ -1097,6 +1187,8 @@ process_open (CockpitWebService *self,
   const gchar *password;
   const gchar *host;
   const gchar *host_key;
+  const gchar *group;
+  GBytes *payload;
   gboolean private;
 
   if (self->closing)
@@ -1108,6 +1200,12 @@ process_open (CockpitWebService *self,
   if (cockpit_session_by_channel (&self->sessions, channel))
     {
       g_warning ("cannot open a channel %s with the same id as another channel", channel);
+      return FALSE;
+    }
+
+  if (!cockpit_json_get_string (options, "group", NULL, &group))
+    {
+      g_warning ("%s: received open command with invalid group", socket->id);
       return FALSE;
     }
 
@@ -1160,6 +1258,21 @@ process_open (CockpitWebService *self,
   cockpit_session_add_channel (&self->sessions, session, channel);
   if (socket)
     cockpit_socket_add_channel (&self->sockets, socket, channel, data_type);
+  if (group)
+    g_hash_table_insert (self->channel_groups, g_strdup (channel), g_strdup (group));
+
+  json_object_remove_member (options, "host");
+  json_object_remove_member (options, "user");
+  json_object_remove_member (options, "password");
+  json_object_remove_member (options, "host-key");
+
+  if (!session->sent_done)
+    {
+      payload = cockpit_json_write_bytes (options);
+      cockpit_transport_send (session->transport, NULL, payload);
+      g_bytes_unref (payload);
+    }
+
   return TRUE;
 }
 
@@ -1195,7 +1308,7 @@ process_logout (CockpitWebService *self,
   return TRUE;
 }
 
-static gboolean
+static const gchar *
 process_socket_init (CockpitWebService *self,
                      CockpitSocket *socket,
                      JsonObject *options)
@@ -1203,34 +1316,41 @@ process_socket_init (CockpitWebService *self,
   gint64 version;
 
   if (!cockpit_json_get_int (options, "version", -1, &version))
-    version = -1;
+    {
+      g_warning ("invalid version field in init message");
+      return "protocol-error";
+    }
 
-  if (version == 0)
+  if (version == 1)
     {
       g_debug ("received web socket init message");
       socket->init_received = TRUE;
-      return TRUE;
+      return NULL;
     }
   else
     {
       g_message ("web socket used unsupported version of cockpit protocol: %"
                  G_GINT64_FORMAT, version);
-      return FALSE;
+      return "not-supported";
     }
 }
 
 static void
 inbound_protocol_error (CockpitWebService *self,
-                        WebSocketConnection *connection)
+                        WebSocketConnection *connection,
+                        const gchar *problem)
 {
   GBytes *payload;
 
+  if (problem == NULL)
+    problem = "protocol-error";
+
   if (web_socket_connection_get_ready_state (connection) == WEB_SOCKET_STATE_OPEN)
     {
-      payload = build_control ("command", "close", "problem", "protocol-error", NULL);
+      payload = build_control ("command", "close", "problem", problem, NULL);
       web_socket_connection_send (connection, WEB_SOCKET_DATA_TEXT, self->control_prefix, payload);
       g_bytes_unref (payload);
-      web_socket_connection_close (connection, WEB_SOCKET_CLOSE_SERVER_ERROR, "protocol-error");
+      web_socket_connection_close (connection, WEB_SOCKET_CLOSE_SERVER_ERROR, problem);
     }
 }
 
@@ -1239,11 +1359,11 @@ dispatch_inbound_command (CockpitWebService *self,
                           CockpitSocket *socket,
                           GBytes *payload)
 {
+  const gchar *problem = "protocol-error";
   const gchar *command;
   const gchar *channel;
   JsonObject *options = NULL;
   gboolean valid = FALSE;
-  gboolean broadcast = FALSE;
   CockpitSession *session = NULL;
   GHashTableIter iter;
 
@@ -1253,7 +1373,8 @@ dispatch_inbound_command (CockpitWebService *self,
 
   if (g_strcmp0 (command, "init") == 0)
     {
-      valid = process_socket_init (self, socket, options);
+      problem = process_socket_init (self, socket, options);
+      valid = (problem == NULL);
       goto out;
     }
 
@@ -1268,36 +1389,43 @@ dispatch_inbound_command (CockpitWebService *self,
 
   if (g_strcmp0 (command, "open") == 0)
     {
-      valid = process_open (self, socket, channel, options);
+      valid = process_and_relay_open (self, socket, channel, options);
     }
   else if (g_strcmp0 (command, "logout") == 0)
     {
       valid = process_logout (self, options);
-      broadcast = TRUE;
+      if (valid)
+        {
+          /* logout is broadcast to everyone */
+          g_hash_table_iter_init (&iter, self->sessions.by_transport);
+          while (g_hash_table_iter_next (&iter, NULL, (gpointer *)&session))
+            {
+              if (!session->sent_done)
+                cockpit_transport_send (session->transport, NULL, payload);
+            }
+        }
     }
   else if (g_strcmp0 (command, "close") == 0)
     {
-      session = cockpit_session_by_channel (&self->sessions, channel);
-      valid = process_close (self, socket, session, channel, options);
-    }
-
-  if (!valid)
-    goto out;
-
-  if (broadcast)
-    {
-      g_hash_table_iter_init (&iter, self->sessions.by_transport);
-      while (g_hash_table_iter_next (&iter, NULL, (gpointer *)&session))
+      if (channel == NULL)
         {
-          if (!session->sent_done)
-            cockpit_transport_send (session->transport, NULL, payload);
+          g_warning ("got close command without a channel");
+          valid = FALSE;
         }
+      else
+        {
+          valid = process_and_relay_close (self, socket, channel, payload);
+        }
+    }
+  else if (g_strcmp0 (command, "kill") == 0)
+    {
+      /* This command is never forwarded */
+      valid = process_kill (self, socket, options);
     }
   else if (channel)
     {
-      if (!session)
-        session = cockpit_session_by_channel (&self->sessions, channel);
-
+      /* Relay anything with a channel by default */
+      session = cockpit_session_by_channel (&self->sessions, channel);
       if (session)
         {
           if (!session->sent_done)
@@ -1309,7 +1437,7 @@ dispatch_inbound_command (CockpitWebService *self,
 
 out:
   if (!valid)
-    inbound_protocol_error (self, socket->connection);
+    inbound_protocol_error (self, socket->connection, problem);
   if (options)
     json_object_unref (options);
 }
@@ -1376,9 +1504,9 @@ on_web_socket_open (WebSocketConnection *connection,
 
   object = json_object_new ();
   json_object_set_string_member (object, "command", "init");
-  json_object_set_int_member (object, "version", 0);
+  json_object_set_int_member (object, "version", 1);
   json_object_set_string_member (object, "channel-seed", socket->id);
-  json_object_set_string_member (object, "default-host", "localhost");
+  json_object_set_string_member (object, "host", "localhost");
   if (web_socket_connection_get_flavor (connection) == WEB_SOCKET_FLAVOR_RFC6455)
     {
       capabilities = json_array_new ();
@@ -1509,6 +1637,7 @@ cockpit_web_service_init (CockpitWebService *self)
   cockpit_sockets_init (&self->sockets);
   cockpit_sidebands_init (&self->sidebands);
   self->ping_timeout = g_timeout_add_seconds (cockpit_ws_ping_interval, on_ping_time, self);
+  self->channel_groups = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, g_free);
 }
 
 static void
@@ -1570,8 +1699,11 @@ create_web_socket_server_for_stream (const gchar **protocols,
 {
   WebSocketConnection *connection;
   const gchar *host = NULL;
+  const gchar **origins;
+  gchar *allocated = NULL;
+  gchar *origin = NULL;
+  gchar *defaults[2];
   gboolean secure;
-  gchar *origin;
   gchar *url;
 
   if (headers)
@@ -1586,13 +1718,21 @@ create_web_socket_server_for_stream (const gchar **protocols,
                          host ? host : "localhost",
                          query ? "?" : "",
                          query ? query : "");
-  origin = g_strdup_printf ("%s://%s", secure ? "https" : "http", host);
 
-  connection = web_socket_server_new_for_stream (url, origin, protocols,
-                                                 io_stream, headers,
-                                                 input_buffer);
-  g_free (origin);
+  origins = cockpit_conf_strv ("WebService", "Origins", ' ');
+  if (origins == NULL)
+    {
+      origin = g_strdup_printf ("%s://%s", secure ? "https" : "http", host);
+      defaults[0] = origin;
+      defaults[1] = NULL;
+      origins = (const gchar **)defaults;
+    }
+
+  connection = web_socket_server_new_for_stream (url, origins, protocols,
+                                                 io_stream, headers, input_buffer);
+  g_free (allocated);
   g_free (url);
+  g_free (origin);
 
   return connection;
 }
@@ -1704,8 +1844,6 @@ on_sideband_open (WebSocketConnection *connection,
                   CockpitWebService *self)
 {
   CockpitSideband *sideband;
-  CockpitSession *session;
-  GBytes *payload;
 
   /*
    * We delayed sending the "open" message for the sideband channel
@@ -1716,20 +1854,10 @@ on_sideband_open (WebSocketConnection *connection,
   sideband = cockpit_sideband_by_connection (&self->sidebands, connection);
   g_return_if_fail (sideband != NULL);
 
-  if (!process_open (self, NULL, sideband->channel, sideband->options))
+  if (!process_and_relay_open (self, NULL, sideband->channel, sideband->options))
     {
       web_socket_connection_close (connection, WEB_SOCKET_CLOSE_SERVER_ERROR, "protocol-error");
       return;
-    }
-
-  session = cockpit_session_by_channel (&self->sessions, sideband->channel);
-  g_return_if_fail (sideband != NULL);
-
-  if (!session->sent_done)
-    {
-      payload = cockpit_json_write_bytes (sideband->options);
-      cockpit_transport_send (session->transport, NULL, payload);
-      g_bytes_unref (payload);
     }
 }
 
@@ -2011,20 +2139,6 @@ object_to_headers (JsonObject *object,
       g_ascii_strcasecmp (header, "Connection") == 0)
     return;
 
-  /*
-   * Since we add the cockpitlang Cookie to the Accept-Language header, we need to
-   * add this back into the Vary header so the browser knows Cookies this resource.
-   */
-
-  if (g_ascii_strcasecmp (header, "Vary") == 0)
-    {
-      if (strstr (value, "Accept-Language"))
-        {
-          g_hash_table_insert (headers, g_strdup (header), g_strdup_printf ("Cookie, %s", value));
-          return;
-        }
-    }
-
   g_hash_table_insert (headers, g_strdup (header), g_strdup (value));
 }
 
@@ -2177,7 +2291,6 @@ resource_respond (CockpitWebService *self,
   gchar *quoted_etag = NULL;
   gchar *package = NULL;
   gchar *val = NULL;
-  gchar *language = NULL;
   gboolean ret = FALSE;
   GHashTableIter iter;
   GBytes *command;
@@ -2267,8 +2380,6 @@ resource_respond (CockpitWebService *self,
                        "binary", "raw",
                        NULL);
 
-  language = cockpit_web_server_parse_cookie (headers, "cockpitlang");
-
   heads = json_object_new ();
 
   g_hash_table_iter_init (&iter, headers);
@@ -2285,7 +2396,6 @@ resource_respond (CockpitWebService *self,
           g_ascii_strcasecmp (key, "User-Agent") == 0 ||
           g_ascii_strcasecmp (key, "Accept-Charset") == 0 ||
           g_ascii_strcasecmp (key, "Accept-Ranges") == 0 ||
-          g_ascii_strcasecmp (key, "Content-Encoding") == 0 ||
           g_ascii_strcasecmp (key, "Content-Length") == 0 ||
           g_ascii_strcasecmp (key, "Content-MD5") == 0 ||
           g_ascii_strcasecmp (key, "Content-Range") == 0 ||
@@ -2293,27 +2403,11 @@ resource_respond (CockpitWebService *self,
           g_ascii_strcasecmp (key, "TE") == 0 ||
           g_ascii_strcasecmp (key, "Trailer") == 0 ||
           g_ascii_strcasecmp (key, "Upgrade") == 0 ||
-          g_ascii_strcasecmp (key, "Transfer-Encoding") == 0 ||
-          g_ascii_strcasecmp (key, "Accept-Encoding") == 0)
+          g_ascii_strcasecmp (key, "Transfer-Encoding") == 0)
         continue;
-
-      if (language && g_ascii_strcasecmp (key, "Accept-Language") == 0)
-        {
-          val = g_strdup_printf ("%s; %s", language, (gchar *)value);
-          g_free (language);
-          language = NULL;
-          value = val;
-        }
 
       json_object_set_string_member (heads, key, value);
       g_free (val);
-    }
-
-  if (language)
-    {
-      json_object_set_string_member (heads, "Accept-Language", language);
-      g_free (language);
-      language = NULL;
     }
 
   if (where[0] != '$')
@@ -2343,7 +2437,6 @@ resource_respond (CockpitWebService *self,
 out:
   g_strfreev (parts);
   g_free (quoted_etag);
-  g_free (language);
   g_free (package);
   return ret;
 }

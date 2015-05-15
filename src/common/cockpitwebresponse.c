@@ -417,6 +417,7 @@ cockpit_web_response_queue (CockpitWebResponse *self,
 {
   gchar *data;
   GBytes *bytes;
+  gsize length;
 
   g_return_val_if_fail (block != NULL, FALSE);
   g_return_val_if_fail (self->complete == FALSE, FALSE);
@@ -427,7 +428,16 @@ cockpit_web_response_queue (CockpitWebResponse *self,
       return FALSE;
     }
 
-  g_debug ("%s: queued %d bytes", self->logname, (int)g_bytes_get_size (block));
+  length = g_bytes_get_size (block);
+  g_debug ("%s: queued %d bytes", self->logname, (int)length);
+
+  /*
+   * We cannot queue chunks of length zero. Besides being silly, this
+   * messes with chunked encoding. The 0 length block means end of
+   * response.
+   */
+  if (length == 0)
+    return TRUE;
 
   if (!self->chunked)
     {
@@ -552,6 +562,7 @@ cockpit_web_response_get_state (CockpitWebResponse *self)
 
 enum {
     HEADER_CONTENT_TYPE = 1 << 0,
+    HEADER_CONTENT_ENCODING = 1 << 1,
 };
 
 static GString *
@@ -580,6 +591,8 @@ append_header (GString *string,
     }
   if (g_ascii_strcasecmp ("Content-Type", name) == 0)
     return HEADER_CONTENT_TYPE;
+  if (g_ascii_strcasecmp ("Content-Encoding", name) == 0)
+    return HEADER_CONTENT_ENCODING;
   else if (g_ascii_strcasecmp ("Content-Length", name) == 0)
     g_critical ("Don't set Content-Length manually. This is a programmer error.");
   else if (g_ascii_strcasecmp ("Connection", name) == 0)
@@ -651,6 +664,7 @@ finish_headers (CockpitWebResponse *self,
     { ".png", "image/png" },
     { ".svg", "image/svg+xml" },
     { ".ttf", "application/octet-stream" }, /* unassigned */
+    { ".txt", "text/plain" },
     { ".woff", "application/font-woff" },
     { ".xml", "text/xml" },
   };
@@ -672,16 +686,19 @@ finish_headers (CockpitWebResponse *self,
   if (status != 304)
     {
       if (length >= 0)
-        {
-          self->chunked = FALSE;
-          g_string_append_printf (string, "Content-Length: %" G_GSSIZE_FORMAT "\r\n", length);
-        }
-      else
+        g_string_append_printf (string, "Content-Length: %" G_GSSIZE_FORMAT "\r\n", length);
+
+      if (length < 0 || seen & HEADER_CONTENT_ENCODING)
         {
           self->chunked = TRUE;
           g_string_append_printf (string, "Transfer-Encoding: chunked\r\n");
         }
+      else
+        {
+          self->chunked = FALSE;
+        }
     }
+
   if (!self->keep_alive)
     g_string_append (string, "Connection: close\r\n");
   g_string_append (string, "\r\n");
@@ -1130,4 +1147,206 @@ cockpit_web_response_pop_path (CockpitWebResponse *self)
     return g_strdup (beg);
   else
     return NULL;
+}
+
+/**
+ * cockpit_web_response_gunzip:
+ * @bytes: the compressed bytes
+ * @error: place to put an error
+ *
+ * Perform gzip decompression on the @bytes.
+ *
+ * Returns: the uncompressed bytes, caller owns return value.
+ */
+GBytes *
+cockpit_web_response_gunzip (GBytes *bytes,
+                             GError **error)
+{
+  GConverter *converter;
+  GConverterResult result;
+  const guint8 *in;
+  gsize inl, outl, read, written;
+  GByteArray *out;
+
+  converter = G_CONVERTER (g_zlib_decompressor_new (G_ZLIB_COMPRESSOR_FORMAT_GZIP));
+
+  in = g_bytes_get_data (bytes, &inl);
+  out = g_byte_array_new ();
+
+  do
+    {
+      outl = out->len;
+      g_byte_array_set_size (out, outl + inl);
+
+      result = g_converter_convert (converter, in, inl, out->data + outl, inl,
+                                    G_CONVERTER_INPUT_AT_END, &read, &written, error);
+      if (result == G_CONVERTER_ERROR)
+        break;
+
+      g_byte_array_set_size (out, outl + written);
+      in += read;
+      inl -= read;
+    }
+  while (result != G_CONVERTER_FINISHED);
+
+  g_object_unref (converter);
+
+  if (result != G_CONVERTER_FINISHED)
+    {
+      g_byte_array_unref (out);
+      return NULL;
+    }
+  else
+    {
+      return g_byte_array_free_to_bytes (out);
+    }
+}
+
+static const gchar *
+find_extension (const gchar *path)
+{
+  const gchar *dot;
+  const gchar *slash;
+
+  dot = strrchr (path, '.');
+  slash = strrchr (path, '/');
+
+  /* Dots before the last slash don't count */
+  if (dot && slash && dot < slash)
+    dot = NULL;
+
+  /* Leading dots on the filename don't count */
+  if (dot && (dot == path || dot == slash + 1))
+    dot = NULL;
+
+  return dot;
+}
+
+static GBytes *
+load_file (const gchar *filename,
+           GError **error)
+{
+  GError *local_error = NULL;
+  GMappedFile *mapped;
+  GBytes *bytes;
+
+  mapped = g_mapped_file_new (filename, FALSE, &local_error);
+
+  if (g_error_matches (local_error, G_FILE_ERROR, G_FILE_ERROR_NOENT) ||
+      g_error_matches (local_error, G_FILE_ERROR, G_FILE_ERROR_ISDIR) ||
+      g_error_matches (local_error, G_FILE_ERROR, G_FILE_ERROR_NAMETOOLONG) ||
+      g_error_matches (local_error, G_FILE_ERROR, G_FILE_ERROR_LOOP) ||
+      g_error_matches (local_error, G_FILE_ERROR, G_FILE_ERROR_INVAL))
+    {
+      g_clear_error (&local_error);
+      return NULL;
+    }
+
+  /* A real error to stop on */
+  else if (local_error)
+    {
+      g_propagate_error (error, local_error);
+      return NULL;
+    }
+
+  bytes = g_mapped_file_get_bytes (mapped);
+  g_mapped_file_unref (mapped);
+
+  return bytes;
+}
+
+/**
+ * cockpit_web_response_negotiation:
+ * @path: likely filesystem path
+ * @existing: a table of existing files
+ * @chosen: out, a pointer to the suffix that was chosen
+ * @error: a failure
+ *
+ * Find a file to serve based on the suffixes. We prune off extra
+ * extensions while looking for a file that's present. We append
+ * .min and .gz when looking for files.
+ *
+ * The @existing may be NULL, if non-null it'll be used to check if
+ * files exist.
+ */
+GBytes *
+cockpit_web_response_negotiation (const gchar *path,
+                                  GHashTable *existing,
+                                  gchar **actual,
+                                  GError **error)
+{
+  gchar *base = NULL;
+  const gchar *ext;
+  gchar *dot;
+  gchar *name = NULL;
+  GBytes *bytes = NULL;
+  GError *local_error = NULL;
+  gint i;
+
+  ext = find_extension (path);
+  if (ext)
+    {
+      base = g_strndup (path, ext - path);
+    }
+  else
+    {
+      ext = "";
+      base = g_strdup (path);
+    }
+
+  while (!bytes)
+    {
+      for (i = 0; i < 4; i++)
+        {
+          g_free (name);
+          switch (i)
+            {
+            case 0:
+              name = g_strconcat (base, ext, NULL);
+              break;
+            case 1:
+              name = g_strconcat (base, ".min", ext, NULL);
+              break;
+            case 2:
+              name = g_strconcat (base, ext, ".gz", NULL);
+              break;
+            case 3:
+              name = g_strconcat (base, ".min", ext, ".gz", NULL);
+              break;
+            default:
+              g_assert_not_reached ();
+            }
+
+          if (existing)
+            {
+              if (!g_hash_table_lookup (existing, name))
+                continue;
+            }
+
+          bytes = load_file (name, &local_error);
+          if (bytes)
+            break;
+          if (local_error)
+            goto out;
+        }
+
+      /* Pop one level off the file name */
+      dot = (gchar *)find_extension (base);
+      if (!dot)
+        break;
+
+      dot[0] = '\0';
+    }
+
+out:
+  if (local_error)
+    g_propagate_error (error, local_error);
+  if (bytes && name && actual)
+    {
+      *actual = name;
+      name = NULL;
+    }
+  g_free (name);
+  g_free (base);
+  return bytes;
 }

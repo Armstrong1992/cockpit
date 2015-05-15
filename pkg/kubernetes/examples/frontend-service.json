@@ -4,18 +4,20 @@
 
     "metadata": {
         "name": "frontend-ruby",
-        "namespace": "default",
         "labels": {
             "template": "ruby-helloworld-sample"
         }
     },
     "spec": {
-        "port": 5432,
-        "protocol": "TCP",
+        "ports": [{
+            "name": "",
+            "port": 5432,
+            "protocol": "TCP",
+            "targetPort": 8080
+        }],
         "selector": {
             "name": "frontend-ruby"
         },
-        "containerPort": 8080,
         "sessionAffinity": "None"
     }
 }

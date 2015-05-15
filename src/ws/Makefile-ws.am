@@ -41,6 +41,7 @@ EXTRA_DIST += \
 	src/ws/mock-krb5.conf.in \
 	src/ws/mock-kdc.conf.in \
 	src/ws/mock-static \
+	src/ws/mock-config.conf \
 	$(NULL)
 
 # ----------------------------------------------------------------------------------------------------
@@ -76,9 +77,6 @@ cockpit-testing.service : src/ws/cockpit-testing.service.in Makefile
 noinst_DATA += cockpit-testing.service
 testassets_systemdunit_data += cockpit-testing.service
 
-cockpitconfdir = $(sysconfdir)/cockpit
-cockpitconf_DATA = src/ws/config
-
 firewalldir = $(prefix)/lib/firewalld/services
 firewall_DATA = src/ws/cockpit.xml
 
@@ -92,7 +90,6 @@ EXTRA_DIST += \
 	src/ws/cockpit.service.in \
 	src/ws/cockpit-testing.service.in \
 	src/ws/test-server.service.in \
-	src/ws/config \
 	$(firewall_DATA) \
 	$(NULL)
 
@@ -134,13 +131,12 @@ check_PROGRAMS += test-server
 testassets_programs += test-server
 testassets_data += pkg/shell/test-dbusx.html \
                    pkg/shell/dbus.js  \
-                   pkg/base/cockpit.js \
-		   pkg/shell/polyfills.js \
-                   lib/qunit-1.14.0.css \
-                   lib/jquery.v2.1.0.js \
-                   lib/qunit-1.14.0.js \
-                   lib/qunit-tap.js \
-                   tools/qunit-config.js \
+                   pkg/shell/shell.js \
+                   pkg/base1/require.js \
+                   pkg/base1/cockpit.js \
+                   pkg/base1/jquery.js \
+                   tools/qunit.css \
+                   tools/qunit.js \
                    $(NULL)
 
 test_server_SOURCES = src/ws/test-server.c $(mock_dbus_sources)

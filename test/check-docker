@@ -20,12 +20,40 @@
 
 from testlib import *
 import json
+import os
+import sys
 
 class TestDocker(MachineCase):
     def confirm(self):
-        self.browser.wait_popup("confirmation-dialog")
-        self.browser.click("#confirmation-dialog-confirm")
-        self.browser.wait_popdown("confirmation-dialog")
+        b = self.browser
+        b.wait_popup("confirmation-dialog")
+        b.click("#confirmation-dialog-confirm")
+        # popdown should be really quick
+        with b.wait_timeout(5):
+            b.wait_popdown("confirmation-dialog")
+
+    def del_container_from_details(self, container_name):
+        b = self.browser
+        b.click("#container-details-delete")
+        with b.wait_timeout(20):
+            try:
+                self.confirm()
+                b.enter_page("containers")
+                b.wait_not_in_text("#containers-containers", container_name)
+            except:
+                # we may have to confirm again for forced deletion
+                self.confirm()
+                b.enter_page("containers")
+                b.wait_not_in_text("#containers-containers", container_name)
+
+    def wait_for_message(self, message):
+        b = self.browser
+        # HACK - sometimes container output is missing from the logs
+        #        https://github.com/docker/docker/issues/10617
+        try:
+            b.wait_in_text("#container-terminal", message)
+        except:
+            raise RepeatThis("https://github.com/docker/docker/issues/10617")
 
     def testBasic(self):
         b = self.browser
@@ -41,17 +69,15 @@ class TestDocker(MachineCase):
         m.execute("systemctl start docker")
 
         self.login_and_go("containers", href="/docker/containers")
+        b.wait_in_text("#containers-images", "busybox")
 
-        # Import the container-probe image and wait for it to appear
-        m.upload(["container-probe.tar.gz"], "/var/tmp/container-probe.tar.gz")
-        m.execute("docker import - test/container-probe </var/tmp/container-probe.tar.gz")
-        b.wait_in_text("#containers-images", "container-probe")
+        message = "HelloMessage."
 
         # Run it
-        b.click('#containers-images tr:contains("container-probe") button.btn-play')
+        b.click('#containers-images tr:contains("busybox") button.fa-play')
         b.wait_popup("containers_run_image_dialog")
         b.set_val("#containers-run-image-name", "PROBE")
-        b.set_val("#containers-run-image-command", "/bin/container-probe")
+        b.set_val("#containers-run-image-command", "/bin/echo '%s'" % (message))
         b.click("#containers-run-image-run");
         b.wait_popdown("containers_run_image_dialog")
         b.wait_in_text("#containers-containers", "PROBE")
@@ -60,20 +86,16 @@ class TestDocker(MachineCase):
         b.click('#containers-containers tr:contains("PROBE")')
         b.enter_page("container-details")
         # The terminal uses NO-BREAK SPACE so we check for that here
-        b.wait_in_text("#container-terminal", "Hello from container-probe.")
+        self.wait_for_message(message)
         b.wait_in_text("#container-details-state", "Exited")
 
-        # Delete container
-        b.click("#container-details-delete")
-        self.confirm()
-        b.enter_page("containers")
-        b.wait_not_in_text("#containers-containers", "PROBE")
+        self.del_container_from_details("PROBE")
 
         # Run it without TTY
-        b.click('#containers-images tr:contains("container-probe") button.btn-play')
+        b.click('#containers-images tr:contains("busybox") button.fa-play')
         b.wait_popup("containers_run_image_dialog")
         b.set_val("#containers-run-image-name", "PROBE")
-        b.set_val("#containers-run-image-command", "/bin/container-probe")
+        b.set_val("#containers-run-image-command", "/bin/echo '%s'" % (message))
         b.click("#containers-run-image-with-terminal");
         b.click("#containers-run-image-run");
         b.wait_popdown("containers_run_image_dialog")
@@ -84,10 +106,10 @@ class TestDocker(MachineCase):
         self.assertEqual(info[0]["HostConfig"]["Links"], None)
 
         # Create another container linked to old one
-        b.click('#containers-images tr:contains("container-probe") button.btn-play')
+        b.click('#containers-images tr:contains("busybox") button.fa-play')
         b.wait_popup("containers_run_image_dialog")
         b.set_val("#containers-run-image-name", "PROBE2")
-        b.set_val("#containers-run-image-command", "/bin/container-probe")
+        b.set_val("#containers-run-image-command", "/bin/echo '%s'" % (message))
         b.click("#containers-run-image-with-terminal");
         b.wait_not_visible("#select-linked-containers");
         b.click("#link-containers");
@@ -114,65 +136,70 @@ class TestDocker(MachineCase):
         b.wait_visible("#containers-containers tbody tr:first button.btn-delete")
         b.wait_not_present("#containers-containers tbody tr:first button.btn-delete.disabled")
         b.click("#containers-containers tbody tr:first button.btn-delete")
-        b.wait_not_in_text('#containers-containers tbody tr:first', "PROBE2")
+        with b.wait_timeout(20):
+            try:
+                b.wait_not_in_text('#containers-containers tbody tr:first', "PROBE2")
+            except:
+                self.confirm()
+                b.wait_not_in_text('#containers-containers tbody tr:first', "PROBE2")
 
         # Check output of PROBE
         b.click('#containers-containers tr:contains("PROBE")')
         b.enter_page("container-details")
-        b.wait_in_text("#container-terminal", "Hello from container-probe.")
+        self.wait_for_message(message)
         b.call_js_func("ph_count_check", ".logs",  1)
         b.wait_in_text("#container-details-state", "Exited")
 
         # Make sure after restart we only have one
         b.click("#container-details-start")
-        b.wait_in_text("#container-terminal", "Hello from container-probe.\nHello from container-probe.")
+        self.wait_for_message("%s\n%s" % (message, message))
         b.call_js_func("ph_count_check", ".logs",  1)
         b.wait_in_text("#container-details-state", "Exited")
 
-        # Delete container
-        b.click("#container-details-delete")
-        self.confirm()
-        b.enter_page("containers")
-        b.wait_not_in_text("#containers-containers", "PROBE")
+        self.del_container_from_details("PROBE")
 
         # Delete image
-        b.click('#containers-images tr:contains("container-probe")')
+        b.click('#containers-images tr:contains("busybox")')
         b.enter_page("image-details")
         b.click("#image-details-delete")
         self.confirm()
         b.enter_page("containers")
+        b.wait_not_in_text('#containers-images', 'busybox')
 
     def testExpose(self):
         b = self.browser
         m = self.machine
         self.allow_journal_messages('.*denied.*name_connect.*docker.*')
 
+        if m.os == "fedora-22":
+            print "Skipping TestDocker.testExpose on Fedora 22"
+            return
+
         m.execute("systemctl start docker")
 
         self.login_and_go("containers", href="/docker/containers")
+        b.wait_in_text("#containers-images", "busybox")
 
         port = 3380;
-
-        # Import the container-probe image and wait for it to appear
-        m.upload(["container-probe.tar.gz"], "/var/tmp/container-probe.tar.gz")
-        m.execute("docker import - test/container-probe </var/tmp/container-probe.tar.gz")
-        b.wait_in_text("#containers-images", "container-probe")
+        message = "HelloMessage."
 
         # Create an updated image, expose a port
-        m.execute("mkdir /var/tmp/container-probe2")
+        m.execute("mkdir /var/tmp/container-probe")
         m.execute("""echo -e '
-FROM test/container-probe
+FROM busybox
 MAINTAINER cockpit
 EXPOSE %d
-CMD ["/bin/container-probe", "%d"]
-' > /var/tmp/container-probe2/Dockerfile""" % (port, port))
-        m.execute("docker build -t test/container-probe2 /var/tmp/container-probe2");
+CMD ["/bin/sh", "-c", "echo '%s' | nc -l -p %d; echo '%s'"]
+' > /var/tmp/container-probe/Dockerfile""" % (port, message, port, message))
+        image_name = "test/container-probe"
+        m.execute("docker build -t %s /var/tmp/container-probe" % (image_name))
+        m.execute("rm -rf /var/tmp/container-probe")
 
         # Wait for it to appear
-        b.wait_in_text("#containers-images", "container-probe2")
+        b.wait_in_text("#containers-images", image_name)
 
         # Run it
-        b.click('#containers-images tr:contains("container-probe2") button.btn-play')
+        b.click("#containers-images tr:contains(\"%s\") button.fa-play" % (image_name))
         b.wait_popup("containers_run_image_dialog")
         b.set_val("#containers-run-image-name", "PROBE2")
         b.set_val(".containers-run-portmapping form:eq(0) input:eq(1)", port)
@@ -180,34 +207,30 @@ CMD ["/bin/container-probe", "%d"]
         b.wait_popdown("containers_run_image_dialog")
         b.wait_in_text("#containers-containers", "PROBE2")
 
+        # Check connection on port
+        data = m.execute("exec 3<>/dev/tcp/localhost/%d; cat <&3" % (port)).rstrip()
+        self.assertEqual(data, message)
+
         # Check output of the probe
         b.click('#containers-containers tr:contains("PROBE2")')
         b.enter_page("container-details")
-        b.wait_in_text("#container-terminal", "Hello from container-probe.")
+        self.wait_for_message(message)
         b.wait_in_text("#container-details-ports", "0.0.0.0:%d -> %d/tcp" % (port, port))
-
-        # Check connection on port
-        b.wait_in_text("#container-terminal", u"Waiting\xa0for\xa0connection\xa0on\xa0port\xa0%d." % (port))
-        expected_message = "Sending messages"
-        data = m.execute("exec 3<>/dev/tcp/localhost/%d; cat <&3" % (port))
-        check_eq(data, expected_message)
 
         # Wait for exit
         b.wait_in_text("#container-details-state", "Exited")
 
-        # Delete container
-        b.click("#container-details-delete")
-        self.confirm()
-        b.enter_page("containers")
-        b.wait_not_in_text("#containers-containers", "PROBE")
-
+        self.del_container_from_details("PROBE2")
         nport = port + 1;
         # Run it again, but expose additional port
-        b.click('#containers-images tr:contains("container-probe2") button.btn-play')
+        b.click("#containers-images tr:contains(\"%s\") button.fa-play" % (image_name))
         b.wait_popup("containers_run_image_dialog")
         b.set_val("#containers-run-image-name", "PROBE2")
         # Tell our probe to listen on both ports
-        b.set_val("#containers-run-image-command", "/bin/container-probe %d %d" % (port, nport))
+        second_message = "%s" % (message);
+        b.set_val("#containers-run-image-command",
+                  "/bin/sh -c \"echo '%s'; echo '%s' | nc -l -p %d; echo '%s'; echo '%s' | nc -l -p %d\""
+                    % (message, message, port, second_message, second_message, nport))
         b.set_val(".containers-run-portmapping form:eq(0) input:eq(1)", port)
         b.click(".containers-run-portmapping form:eq(0) .fa-plus")
         b.set_val(".containers-run-portmapping form:eq(1) input:eq(0)", nport)
@@ -220,26 +243,24 @@ CMD ["/bin/container-probe", "%d"]
         # Check output of the probe
         b.click('#containers-containers tr:contains("PROBE2")')
         b.enter_page("container-details")
-        b.wait_in_text("#container-terminal", "Hello from container-probe.")
         b.wait_in_text("#container-details-ports", ":%d -> %d/tcp" % (port, port))
         b.wait_in_text("#container-details-ports", ":%d -> %d/tcp" % (nport, nport))
+        self.wait_for_message(message)
 
-        # Check connection on both ports
-        b.wait_in_text("#container-terminal", u"Waiting\xa0for\xa0connection\xa0on\xa0port\xa0%d." % (port))
-        data = m.execute("exec 3<>/dev/tcp/localhost/%d; cat <&3" % (port))
-        check_eq(data, expected_message)
-        b.wait_in_text("#container-terminal", u"Waiting\xa0for\xa0connection\xa0on\xa0port\xa0%d." % (nport))
-        data = m.execute("exec 3<>/dev/tcp/localhost/%d; cat <&3" % (nport))
-        check_eq(data, expected_message)
+        # Check connection on first port, remove trailing whitespace
+        data = m.execute("exec 3<>/dev/tcp/localhost/%d; cat <&3" % (port)).rstrip()
+        self.assertEqual(data, message)
+
+        self.wait_for_message(second_message)
+
+        # Check connection on second port, remove trailing whitespace
+        data = m.execute("exec 3<>/dev/tcp/localhost/%d; cat <&3" % (nport)).rstrip()
+        self.assertEqual(data, second_message)
 
         # Wait for exit
         b.wait_in_text("#container-details-state", "Exited")
 
-        # Delete container
-        b.click("#container-details-delete")
-        self.confirm()
-        b.enter_page("containers")
-        b.wait_not_in_text("#containers-containers", "PROBE")
+        self.del_container_from_details("PROBE")
 
     def testFailure(self):
         b = self.browser

@@ -1,0 +1,647 @@
+<!DOCTYPE html>
+<!--
+  This file is part of Cockpit.
+
+  Copyright (C) 2014 Red Hat, Inc.
+
+  Cockpit is free software; you can redistribute it and/or modify it
+  under the terms of the GNU Lesser General Public License as published by
+  the Free Software Foundation; either version 2.1 of the License, or
+  (at your option) any later version.
+
+  Cockpit is distributed in the hope that it will be useful, but
+  WITHOUT ANY WARRANTY; without even the implied warranty of
+  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+  Lesser General Public License for more details.
+
+  You should have received a copy of the GNU Lesser General Public License
+  along with Cockpit; If not, see <http://www.gnu.org/licenses/>.
+-->
+<html>
+  <head>
+    <title>Channel Tests</title>
+    <meta charset="utf-8">
+    <link rel="stylesheet" href="../../tools/qunit.css" type="text/css" media="screen" />
+    <script type="text/javascript" src="../../tools/qunit.js"></script>
+
+    <script type="text/javascript" src="cockpit.js"></script>
+  </head>
+  <body>
+    <h1 id="qunit-header">Channel Tests</h1>
+    <h2 id="qunit-banner"></h2><div id="qunit-testrunner-toolbar"></div>
+    <h2 id="qunit-userAgent"></h2><ol id="qunit-tests"></ol>
+    <div id="qunit-fixture">test markup, will be hidden</div>
+    <div id="done-flag" style="display:none">Done</div>
+  </body>
+<script type="text/javascript">
+
+/* Set this to a regexp to ignore that warning once */
+function console_ignore_log(exp) {
+    var console_log = console.log;
+    console.log = function() {
+        if (!exp.exec(arguments[0]))
+            console_log.apply(console, arguments);
+        console.log = console_log;
+    }
+}
+
+/* The other end of the mock websocket */
+function MockPeer() {
+    /* These are events */
+    this.open = function(event) { };
+    this.recv = function(event, channel, payload) { };
+
+    /* Methods filled in by MockWebSocket */
+    this.send = function(channel, payload) { throw "not reached"; };
+    this.close = function(options) { throw "not reached"; };
+}
+
+window.mock = { url: "ws://url", last_transport: true };
+var force_default_host = null;
+var mock_peer = new MockPeer();
+
+QUnit.testDone(function() {
+    mock_peer = new MockPeer();
+    if (window.mock.last_transport)
+        window.mock.last_transport.close();
+    window.mock.last_transport = null;
+});
+
+/* Mock WebSocket */
+function MockWebSocket(url, protocol) {
+    if (typeof url != "string")
+        throw "WebSocket(@url) is not a string: " + typeof url;
+    if (typeof protocol != "string")
+        throw "WebSocket(@protocol) is not a string: " + typeof protocol;
+
+    this.onopen = function(event) { };
+    this.onclose = function(event) { };
+    this.onmessage = function(event) { };
+    this.onerror = function(event) { };
+    this.readyState = 0;
+    this.url = url;
+    this.protocol = protocol;
+    this.extensions = "";
+    this.binaryType = null;
+
+    var ws = this;
+    var mock = mock_peer;
+
+    this.send = function(data) {
+        if (typeof data != "string")
+            throw "WebSocket.send(@data) is not a string: " + typeof data;
+        var pos = data.indexOf("\n");
+        if (pos == -1)
+            throw "Invalid frame sent to WebSocket: " + data;
+        var channel = data.substring(0, pos);
+        var payload = data.substring(pos + 1);
+        window.setTimeout(function() { $(mock).triggerHandler("recv", [channel, payload]); }, 5);
+    };
+
+    this.close = function(code, reason) {
+        if (typeof code != "number" && typeof code != "undefined")
+            throw "WebSocket.close(@code) is not a number: " + typeof code;
+        if (typeof reason != "string" && typeof reason != "undefined")
+            throw "WebSocket.close(@reason) is not a number: " + typeof string;
+        if (this.readyState > 1)
+            throw "WebSocket.close() called on a closed WebSocket" + this.readyState + " " + code + reason;
+        this.readyState = 3;
+        this.onclose({"name": "close", "code": code || 1000, "reason": reason, "wasClean": true });
+    };
+
+    /* console.log("MockWebSocket " + url + " " + protocol); */
+
+    /* Instantiate the global mock peer */
+    mock.send = function(channel, payload) {
+        var event = {
+            "name": "message",
+            "data": channel.toString() + "\n" + payload
+        };
+        window.setTimeout(function() { ws.onmessage(event); }, 5);
+    };
+    mock.close = function(options) {
+        if (!options)
+            options = { };
+        window.setTimeout(function() {
+            ws.close(options.reason && 1000 || 1011, options.reason || "");
+        }, 5);
+    };
+
+    /* Open shortly */
+    window.setTimeout(function() {
+        ws.readyState = 1;
+        $(mock).triggerHandler("open");
+        ws.onopen({"name": "open"});
+        var init = {
+            "command": "init",
+            "version": 1,
+            "channel-seed": "test",
+            "user": {
+                "user": "scruffy",
+                "name": "Scruffy the Janitor"
+            },
+            "system": {
+                "version": "zero.point.zero",
+                "build": "nasty stuff",
+            }
+        }
+        if (force_default_host)
+            init["host"] = force_default_host;
+        force_default_host = null;
+        ws.onmessage({"data": "\n" + JSON.stringify(init)});
+    }, 5);
+}
+
+WebSocket = MockWebSocket;
+
+test("public api", function() {
+    var channel = cockpit.channel({ "host": "host.example.com" });
+    equal(typeof channel, "object", "cockpit.channel() constructor");
+    equal(channel.options.host, "host.example.com", "channel.options is dict");
+    ok(channel.id !== undefined, "channel.id is a field");
+    ok(channel.toString().indexOf("host.example.com") > 0, "channel.toString()");
+    equal(typeof channel.send, "function", "channel.send() is a function");
+    equal(typeof channel.close, "function", "channel.close() is a function");
+    strictEqual(channel.valid, true, "channel.valid is set");
+    equal(typeof cockpit.logout, "function", "cockpit.logout is a function");
+    equal(typeof cockpit.transport, "object", "cockpit.transport is a function");
+    equal(typeof cockpit.transport.close, "function", "cockpit.transport.close is a function");
+    equal(typeof cockpit.transport.options, "object", "cockpit.transport.options is a object");
+
+    if (window.location.origin)
+        equal(cockpit.transport.origin, window.location.origin, "cockpit.transport.origin is correct");
+    else
+        equal(typeof cockpit.transport.origin, "string", "cockpit.transport.origin is present");
+});
+
+asyncTest("open channel", function() {
+    expect(8);
+
+    var channel = cockpit.channel({ "host": "scruffy" });
+    var is_inited = false;
+    $(mock_peer).on("open", function(event) {
+        ok(true, "websocket connected");
+    });
+    $(mock_peer).on("recv", function(event, chan, payload) {
+        var command = JSON.parse(payload);
+        if (!is_inited) {
+            equal(typeof command, "object", "valid json");
+            strictEqual(chan, "", "sent with empty channel");
+            equal (command.command, "init", "got init");
+            equal (command.version, 1, "got init version");
+            is_inited = true;
+        } else {
+            equal(command.command, "open", "right command");
+            strictEqual(command.channel, channel.id, "contains right channel");
+            equal(command.host, "scruffy", "host as expected");
+            start();
+        }
+    });
+});
+
+asyncTest("multiple", function() {
+    expect(1);
+
+    var channel = cockpit.channel({ "host": "scruffy" });
+    var channelb = cockpit.channel({ "host": "amy" });
+
+    $(mock_peer).on("recv", function(event) {
+        $(mock_peer).off("recv");
+        notStrictEqual(channel.id, channelb.id, "channels have different ids");
+        start();
+    });
+});
+
+asyncTest("open no host", function() {
+    expect(2);
+
+    var channel = cockpit.channel({ });
+    $(mock_peer).on("open", function(event) {
+        ok(true, "websocket connected");
+    });
+    $(mock_peer).on("recv", function(event, chan, payload) {
+        var command = JSON.parse(payload);
+        if (command.command == "open") {
+            strictEqual(command.host, undefined, "host not included");
+            start();
+        }
+    });
+});
+
+asyncTest("open auto host", function() {
+    expect(2);
+
+    force_default_host = "planetexpress";
+    var channel = cockpit.channel({ });
+    $(mock_peer).on("open", function(event) {
+        ok(true, "websocket connected");
+    });
+    $(mock_peer).on("recv", function(event, chan, payload) {
+        var command = JSON.parse(payload);
+        if (command.command == "open") {
+            strictEqual(command.host, "planetexpress", "host automatically chosen");
+            start();
+        }
+    });
+});
+
+asyncTest("send message", function() {
+    expect(2);
+
+    var channel = cockpit.channel({ });
+    $(mock_peer).on("open", function(event) {
+	channel.send("Scruffy gonna die the way he lived");
+    });
+    $(mock_peer).on("recv", function(event, chan, payload) {
+        /* Ignore the open and init messages */
+        if (!chan)
+            return;
+        strictEqual(chan, channel.id, "sent with correct channel");
+        equal(payload, "Scruffy gonna die the way he lived", "sent the right payload");
+        start();
+    });
+});
+
+asyncTest("queue messages", function() {
+    expect(1);
+
+    var sentence = [];
+    var channel = cockpit.channel({ });
+    channel.send("Scruffy");
+    channel.send("knows");
+    channel.send("he");
+    channel.send("rules");
+    $(mock_peer).on("recv", function(event, chan, payload) {
+        if (chan == 0)
+            return; /* ignore control messages */
+        sentence.push(payload);
+        if (sentence.length == 4) {
+            equal(sentence.join(" "), "Scruffy knows he rules", "messages queued and sent correctly");
+            start();
+        }
+    });
+});
+
+asyncTest("receive message", function() {
+    expect(1);
+
+    $(mock_peer).on("recv", function(event, chan, payload) {
+        var cmd = JSON.parse(payload);
+        if (cmd.command == "open") {
+            $(mock_peer).off("recv");
+            mock_peer.send(channel.id, "Oh, marrrrmalade!");
+        }
+    });
+
+    var channel = cockpit.channel({ });
+    $(channel).on("message", function(event, message) {
+        equal(message, "Oh, marrrrmalade!", "got right message in channel");
+        start();
+    });
+});
+
+asyncTest("close channel", function() {
+    expect(4);
+
+    $(mock_peer).on("recv", function(event, chan, payload) {
+        var cmd = JSON.parse(payload);
+        if (cmd.command == "init") {
+            return;
+        } else if (cmd.command == "open") {
+            channel.close();
+            return;
+        }
+        equal(cmd.command, "close", "sent close command");
+        strictEqual(cmd.channel, channel.id, "correct channel");
+        mock_peer.send("", payload);
+    });
+    var channel = cockpit.channel({ });
+    $(channel).on("close", function(event, options) {
+        ok(true, "triggered event");
+        ok(!options.problem, "no problem");
+        start();
+    });
+});
+
+asyncTest("close early", function() {
+    expect(3);
+
+    var channel = cockpit.channel({ });
+    $(channel).on("close", function(event, options) {
+        ok(true, "triggered event");
+        equal(options.problem, "yo", "got problem");
+        start();
+    });
+    channel.close("yo");
+    strictEqual(channel.valid, false, "no longer valid");
+});
+
+asyncTest("close problem", function() {
+    expect(5);
+
+    $(mock_peer).on("recv", function(event, chan, payload) {
+        var cmd = JSON.parse(payload);
+        if (cmd.command == "init") {
+            return;
+        } else if (cmd.command == "open") {
+            channel.close({"problem": "problem"});
+            strictEqual(channel.valid, false, "no longer valid");
+            return;
+        }
+        equal(cmd.command, "close", "sent close command");
+        equal(cmd.problem, "problem", "sent reason");
+        start();
+    });
+    var channel = cockpit.channel({ });
+    $(channel).on("close", function(event, options) {
+        ok(true, "triggered event");
+        equal(options.problem, "problem", "set");
+    });
+});
+
+asyncTest("close problem string", function() {
+    expect(5);
+
+    var channel = cockpit.channel({ });
+    $(mock_peer).on("recv", function(event, chan, payload) {
+        var cmd = JSON.parse(payload);
+        if (cmd.command == "init") {
+            return;
+        } else if (cmd.command == "open") {
+            channel.close("testo");
+            strictEqual(channel.valid, false, "no longer valid");
+            return;
+        }
+        equal(cmd.command, "close", "sent close command");
+        equal(cmd.problem, "testo", "sent reason");
+        start();
+    });
+    $(channel).on("close", function(event, options) {
+        ok(true, "triggered event");
+        equal(options.problem, "testo", "set");
+    });
+});
+
+asyncTest("close peer", function() {
+    expect(5);
+
+    $(mock_peer).on("recv", function(event, chan, payload) {
+        var msg = JSON.parse(payload);
+        if (msg.command == "init")
+            return;
+        var cmd = {
+            "command": "close",
+            "channel": channel.id,
+            "problem" : "marmalade",
+            "extra": 5
+        };
+        mock_peer.send("", JSON.stringify(cmd));
+    });
+
+    var channel = cockpit.channel({ });
+    var channelb = cockpit.channel({ });
+
+    $(channel).on("close", function(event, options) {
+        ok(true, "triggered event");
+        equal(options.problem, "marmalade", "received reason");
+        equal(options.extra, 5, "received extra");
+        strictEqual(channel.valid, false, "became invalid");
+        strictEqual(channelb.valid, true, "correct channel");
+        start();
+    });
+});
+
+asyncTest("close socket", function() {
+    expect(4);
+
+    var channel = cockpit.channel({ });
+    var channelb = cockpit.channel({ });
+
+    $(channel).on("close", function(event, options) {
+        equal(options.problem, "disconnected", "received reason");
+        strictEqual(channel.valid, false, "channel is invalid");
+        if (!channel.valid && !channelb.valid)
+            start();
+    });
+
+    $(channelb).on("close", function(event, options) {
+        equal(options.problem, "disconnected", "received reason");
+        strictEqual(channelb.valid, false, "other channel invalid");
+        if (!channel.valid && !channelb.valid)
+            start();
+    });
+
+    mock_peer.close();
+});
+
+asyncTest("logout", function() {
+    $(mock_peer).on("recv", function(event, chan, payload) {
+        var cmd = JSON.parse(payload);
+        if (cmd.command == "logout") {
+            mock_peer.close("disconnected");
+            strictEqual(cmd.disconnect, true, "disconnect set");
+        }
+    });
+
+    var channel = cockpit.channel({ });
+    var channelb = cockpit.channel({ });
+
+    $(channel).on("close", function(event, options) {
+        equal(options.problem, "disconnected", "received reason");
+        strictEqual(channel.valid, false, "channel is invalid");
+        channel = null;
+        if (channel == null && channelb == null)
+            start();
+    });
+
+    $(channelb).on("close", function(event, options) {
+        equal(options.problem, "disconnected", "received reason");
+        strictEqual(channelb.valid, false, "other channel invalid");
+        channelb = null;
+        if (channel == null && channelb == null)
+            start();
+    });
+
+    cockpit.logout(false);
+});
+
+asyncTest("droppriv", function() {
+    expect(1);
+    $(mock_peer).on("recv", function(event, chan, payload) {
+        var cmd = JSON.parse(payload);
+        if (cmd.command == "logout") {
+            strictEqual(cmd.disconnect, false, "disconnect not set");
+            start();
+        }
+    });
+
+    cockpit.drop_privileges();
+});
+
+asyncTest("info", function() {
+    expect(3);
+
+    var info_changed = false;
+
+    $(cockpit.info).on("changed", function() {
+        strictEqual(cockpit.info.version, "zero.point.zero", "cockpit.user.user");
+        strictEqual(cockpit.info.build, "nasty stuff", "cockpit.user.name");
+        info_changed = true;
+    });
+
+    $(mock_peer).on("recv", function(event, chan, payload) {
+        var cmd = JSON.parse(payload);
+        if (cmd.command == "open") {
+            $(mock_peer).off("recv");
+            $(cockpit.info).off("changed");
+            strictEqual(info_changed, true, "info changed event was called");
+            start();
+        }
+    });
+
+    var channel = cockpit.channel({ "host": "scruffy" });
+});
+
+
+asyncTest("send after close", function() {
+    expect(1);
+
+    console_ignore_log(/sending message on closed.*/);
+
+    var received_message = false;
+    var channel = cockpit.channel({ });
+    $(mock_peer).on("recv", function(event, chan, payload) {
+        if (chan != 0)
+            received_message = true;
+    });
+
+    channel.close();
+    channel.send("Dern it.");
+
+    window.setTimeout(function() {
+        ok(!received_message, "didn't send message");
+        start();
+    }, 50);
+});
+
+asyncTest("ignore other commands", function() {
+    expect(1);
+
+    var channel = cockpit.channel({ });
+
+    console_ignore_log(/unhandled control message.*/);
+
+    mock_peer.send(0, JSON.stringify({ "command": "ping"}));
+    mock_peer.send(0, JSON.stringify({ "command": "unexpected"}));
+
+    window.setTimeout(function() {
+        ok(channel.valid, "other messages didn't screw up channel");
+        start();
+    }, 50);
+});
+
+asyncTest("filter message", function() {
+    expect(2);
+
+    var filtered = 0;
+    cockpit.transport.filter(function(message, channel, control) {
+        if (message[0] != '\n') {
+            filtered += 1;
+            return (filtered != 1);
+        }
+    });
+
+    $(mock_peer).on("recv", function(event, chan, payload) {
+        if (chan)
+            mock_peer.send(chan, "blah");
+    });
+
+    var received = 0;
+    var channel = cockpit.channel({ });
+    $(channel).on("message", function(data) {
+        received += 1;
+
+        if (received == 2) {
+            equal(filtered, 3, "filtered right amount");
+            equal(received, 2, "let through right amount");
+            channel.close();
+            start();
+        }
+    });
+
+    channel.send("one");
+    channel.send("two");
+    channel.send("three");
+});
+
+asyncTest("inject message", function() {
+    expect(4);
+
+    var ret = cockpit.transport.inject("bree\nyellow");
+    equal(ret, false, "failure returns false");
+
+    var first = true;
+    var channel;
+    $(mock_peer).on("recv", function(event, chan, payload) {
+        if (first) {
+            var ret = cockpit.transport.inject("bree\nyellow");
+            equal(ret, true, "returned true");
+            first = false;
+            return;
+        }
+
+        if (chan) {
+            equal(chan, "bree", "right channel");
+            equal(payload, "yellow", "right payload");
+            channel.close();
+            start();
+        }
+    });
+
+    channel = cockpit.channel({ });
+});
+
+asyncTest("transport options", function() {
+    expect(2);
+
+    var channel;
+    $(mock_peer).on("recv", function(event, chan, payload) {
+        if (chan) {
+            equal(typeof cockpit.transport.options, "object", "is an object");
+            deepEqual(cockpit.transport.options, {
+                "command": "init",
+                "version": 1,
+                "channel-seed": "test",
+                "user": {
+                    "user": "scruffy",
+                    "name": "Scruffy the Janitor"
+                },
+                "system": {
+                    "version": "zero.point.zero",
+                    "build": "nasty stuff",
+                }
+            }, "is correct");
+            channel.close();
+            start();
+        }
+    });
+
+    channel = cockpit.channel({ });
+    channel.send("blah");
+});
+
+var shell = shell || { };
+
+test("message", function() {
+    expect(4);
+    strictEqual(cockpit.message("terminated"), "Your session has been terminated.", "problem code");
+    strictEqual(cockpit.message({ problem: "timeout" }), "Connection has timed out.", "problem property");
+    strictEqual(cockpit.message({ message: "The message", problem: "blah" }), "The message", "problem property");
+    strictEqual(cockpit.message(55), "55", "invalid input");
+});
+
+window.location.hash = "";
+QUnit.start();
+
+</script>
+</html>

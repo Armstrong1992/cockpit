@@ -1,6 +1,6 @@
 #! /bin/bash
 
-set -ex
+set -e
 
 create_images=
 make_rpms_opts=
@@ -37,15 +37,13 @@ if ! silent $IP address show dev cockpit0; then
   sudo ./vm-prep
 fi
 
-set -x
-
 if [ -z "$create_images" ]; then
     ./vm-download -f cockpit
     ./vm-download -f ipa
 fi
 
 skip="cockpit-doc-
-cockpit-kubernetes-"
+cockpit-debuginfo"
 
 rpms=$(../tools/make-rpms $make_rpms_opts | grep -vF "$skip")
 if [ -z "$rpms" ]; then
@@ -55,13 +53,9 @@ fi
 if [ -n "$create_images" ]; then
     ./vm-reset
     ./vm-create -v -f cockpit
-    ./vm-create -v -f ipa
     unset TEST_DATA
     ./vm-save -f cockpit
-    ./vm-save -f ipa
 fi
 
 ./vm-reset
 ./vm-install -f cockpit $rpms
-
-fakeroot ./make-docker-image container-probe.tar.gz container-probe

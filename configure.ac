@@ -16,7 +16,7 @@
 # along with Cockpit; If not, see <http://www.gnu.org/licenses/>.
 
 AC_INIT([Cockpit],
-        [0.41],
+        [0.56],
         [devel@lists.cockpit-project.org],
         [cockpit],
         [http://www.cockpit-project.org/])
@@ -31,11 +31,13 @@ AM_MAINTAINER_MODE([enable])
 
 AC_USE_SYSTEM_EXTENSIONS
 
+AM_PROG_AR
 AC_PROG_CC
 AC_PROG_CC_C99
 AC_PROG_RANLIB
 AC_ISC_POSIX
 AC_HEADER_STDC
+AC_PROG_LN_S
 
 m4_ifdef([AM_SILENT_RULES], [AM_SILENT_RULES([yes])])
 
@@ -59,8 +61,6 @@ LIBSSH_VERSION="0.6.0"
 GIO_REQUIREMENT="gio-unix-2.0 >= $GLIB_VERSION"
 SYSTEMD_REQUIREMENT="libsystemd-journal >= 187 libsystemd-daemon"
 JSON_GLIB_REQUIREMENT="json-glib-1.0 >= 0.14.0"
-UDISKS_REQUIREMENT="udisks2 >= 2.0.91"
-ACCOUNTS_REQUIREMENT="accountsservice >= 0.6.35"
 POLKIT_REQUIREMENT="polkit-agent-1 >= 0.105"
 
 PKG_CHECK_MODULES(GIO, [$GIO_REQUIREMENT])
@@ -108,11 +108,20 @@ COCKPIT_POLKIT_LIBS="$GIO_LIBS $POLKIT_LIBS"
 AC_SUBST(COCKPIT_POLKIT_CFLAGS)
 AC_SUBST(COCKPIT_POLKIT_LIBS)
 
-PKG_CHECK_MODULES(COCKPIT_DAEMON, [$UDISKS_REQUIREMENT
-                                   $ACCOUNTS_REQUIREMENT])
+COCKPIT_WRAPPER_CFLAGS="$COCKPIT_CFLAGS"
+COCKPIT_WRAPPER_LIBS="$COCKPIT_LIBS"
+AC_SUBST(COCKPIT_WRAPPER_CFLAGS)
+AC_SUBST(COCKPIT_WRAPPER_LIBS)
 
-COCKPIT_DAEMON_CFLAGS="$COCKPIT_CFLAGS $COCKPIT_DAEMON_CFLAGS"
-COCKPIT_DAEMON_LIBS="$COCKPIT_LIBS $COCKPIT_DAEMON_LIBS"
+PKG_CHECK_MODULES(LVM_DEPS, [polkit-gobject-1 >= 0.92
+			     $POLKIT_REQUIREMENT
+			     lvm2app
+			     gudev-1.0 >= 164])
+
+COCKPIT_LVM_CFLAGS="$COCKPIT_CFLAGS $GIO_CFLAGS $LVM_DEPS_CFLAGS"
+COCKPIT_LVM_LIBS="$COCKPIT_LIBS $GIO_LIBS $LVM_DEPS_LIBS"
+AC_SUBST(COCKPIT_LVM_CFLAGS)
+AC_SUBST(COCKPIT_LVM_LIBS)
 
 # whether to build cockpit-ws
 AC_ARG_ENABLE(ws, AC_HELP_STRING([--disable-ws], [Disable cockpit-ws build]))
@@ -135,17 +144,20 @@ fi
 AM_CONDITIONAL(WITH_COCKPIT_WS, test "$enable_ws" = "yes")
 
 # dbus session dir
-AC_MSG_CHECKING(for dbus session services directory)
+AC_MSG_CHECKING(for dbus service directories)
 if test "$enable_prefix_only" = "yes"; then
   dbusservicedir='${datadir}/dbus-1/services'
+  dbussystemdir='${datadir}/dbus-1/system-services'
 else
   dbusservicedir=$($PKG_CONFIG dbus-1 --variable=session_bus_services_dir)
-  if test "$dbusservicedir" = ""; then
-    AC_MSG_ERROR(Couldn't find dbus services directory. Try installing dbus-devel)
+  dbussystemdir=$($PKG_CONFIG dbus-1 --variable=system_bus_services_dir)
+  if test "$dbusservicedir" = "" -o "$dbussystemdir" = ""; then
+    AC_MSG_ERROR(Couldn't find dbus services directories. Try installing dbus-devel)
   fi
 fi
-AC_SUBST([dbusservicedir], [$dbusservicedir])
-AC_MSG_RESULT(dbusservicedir)
+AC_SUBST(dbusservicedir)
+AC_SUBST(dbussystemdir)
+AC_MSG_RESULT($dbusservicedir $dbussystemdir)
 
 # pam
 AC_CHECK_HEADER([security/pam_appl.h], ,
@@ -242,7 +254,7 @@ AC_DEFINE_UNQUOTED([PATH_PKEXEC], ["$PKEXEC"], [Location of pkexec binary])
 
 # Config
 
-AC_DEFINE_UNQUOTED([COCKPIT_CONFIG_FILE],["$sysconfdir/cockpit/config"],[Configuration file])
+AC_DEFINE_UNQUOTED([COCKPIT_CONFIG_FILE],["$sysconfdir/cockpit/cockpit.conf"],[Configuration file])
 
 changequote(,)dnl
 if test "x$GCC" = "xyes"; then
@@ -339,6 +351,17 @@ fi
 
 AM_CONDITIONAL([ENABLE_DOC], [test "$enable_doc" = "yes"])
 
+# Branding
+
+AC_MSG_CHECKING([for branding directory])
+AC_ARG_WITH(branding,
+            AC_HELP_STRING([--with-branding=default],
+                           [Specify which branding to use])
+)
+BRAND=branding/${with_branding:-default}
+AC_MSG_RESULT($BRAND)
+AC_SUBST(BRAND)
+
 # Debug
 
 AC_MSG_CHECKING([for debug mode])
@@ -409,9 +432,6 @@ doc/version
 po/Makefile.in
 ])
 
-# TODO: Hack around the fact that shell.js is composed of multiple files
-ln -sf $(pwd)/shell.js $srcdir/pkg/shell/shell.js
-
 dnl ==========================================================================
 echo "
                Cockpit $VERSION
@@ -427,8 +447,8 @@ echo "
         datadir:                    ${datadir}
         sysconfdir:                 ${sysconfdir}
         localstatedir:              ${localstatedir}
-        systemdsystemunitdir:       ${systemdunitdir}
         dbusservicedir:             ${dbusservicedir}
+        dbussystemdir:              ${dbussystemdir}
         pamdir:                     ${pamdir}
 
         compiler:                   ${CC}
@@ -444,4 +464,5 @@ echo "
         Debug mode:                 ${debug_status}
         With coverage:              ${enable_coverage}
         With address sanitizer:     ${asan_status}
+	Branding directory:         ${BRAND}
 "

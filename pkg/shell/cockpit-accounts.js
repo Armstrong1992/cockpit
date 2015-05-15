@@ -17,146 +17,249 @@
  * along with Cockpit; If not, see <http://www.gnu.org/licenses/>.
  */
 
-/* global jQuery   */
-/* global cockpit  */
-/* global _        */
-/* global C_       */
+define([
+    "jquery",
+    "base1/cockpit",
+    "base1/patterns",
+    "shell/controls",
+    "shell/shell",
+    "shell/cockpit-main"
+], function(jQuery, cockpit, patterns, controls, shell) {
+"use strict";
 
-var shell = shell || { };
-(function($, cockpit, shell) {
-
-function make_set(array) {
-    var s = { };
-    for (var i = 0; i < array.length; i++)
-        s[array[i]] = true;
-    return s;
-}
+var _ = cockpit.gettext;
+var C_ = cockpit.gettext;
+var $ = jQuery.scoped("body", patterns);
 
 function update_accounts_privileged() {
-    shell.update_privileged_ui(
-        shell.default_permission, ".accounts-privileged",
-        cockpit.format(
-            _("The user <b>$0</b> is not permitted to modify accounts"),
-            cockpit.user.name)
-    );
-    $(".accounts-privileged").children("input")
-        .attr('disabled', shell.default_permission.allowed === false);
+    if ($('#account-user-name').text() === 'root' && shell.default_permission.allowed) {
+        controls.update_privileged_ui({allowed: false},
+                                      "#account-delete",
+                                      _("Unable to delete root account"));
+        controls.update_privileged_ui({allowed: false},
+                                      "#account-change-roles",
+                                      _("Unable to change roles for root account"));
+    } else {
+        controls.update_privileged_ui(
+            shell.default_permission, ".accounts-privileged",
+            cockpit.format(
+                _("The user <b>$0</b> is not permitted to modify accounts"),
+                cockpit.user.name)
+        );
+        $(".accounts-privileged").children("input")
+            .attr('disabled', shell.default_permission.allowed === false ||
+                              $('#account-user-name').text() === 'root');
+    }
+}
+
+function passwd_self(old_pass, new_pass) {
+    var old_exps = [
+        /.*\(current\) UNIX password: $/,
+    ];
+    var new_exps = [
+        /.*New password: $/,
+        /.*Retype new password: $/
+    ];
+    var bad_exps = [
+        /.*BAD PASSWORD:.*/
+    ];
+
+    var dfd = $.Deferred();
+    var buffer = "";
+    var sent_new = false;
+    var failure = _("Old password not accepted");
+    var i;
+
+    var timeout = window.setTimeout(function() {
+        failure = _("Prompting via passwd timed out");
+        proc.close("terminated");
+    }, 10 * 1000);
+
+    var proc = cockpit.spawn(["/usr/bin/passwd"], { pty: true, environ: [ "LC_ALL=C" ], err: "out" })
+        .always(function() {
+            window.clearInterval(timeout);
+        })
+        .done(function() {
+            dfd.resolve();
+        })
+        .fail(function(ex) {
+            if (ex.constructor.name == "ProcessError")
+                ex = new Error(failure);
+            dfd.reject(ex);
+        })
+        .stream(function(data) {
+            buffer += data;
+            for (i = 0; i < old_exps.length; i++) {
+                if (old_exps[i].test(buffer)) {
+                    buffer = "";
+                    proc.input(old_pass + "\n", true);
+                    return;
+                }
+            }
+
+            for (i = 0; i < new_exps.length; i++) {
+                if (new_exps[i].test(buffer)) {
+                    buffer = "";
+                    proc.input(new_pass + "\n", true);
+                    failure = _("Failed to change password");
+                    sent_new = true;
+                    return;
+                }
+            }
+
+            for (i = 0; sent_new && i < bad_exps.length; i++) {
+                if (bad_exps[i].test(buffer)) {
+                    failure = _("New password was not accepted");
+                    return;
+                }
+            }
+        });
+
+    return dfd.promise();
+}
+
+function passwd_change(user, new_pass) {
+    var dfd = $.Deferred();
+
+    var buffer = "";
+    cockpit.spawn(["/usr/bin/passwd", "--stdin", user ], {superuser: true, err: "out" })
+        .input(new_pass)
+        .done(function() {
+            dfd.resolve();
+        })
+        .fail(function(ex, response) {
+            if (ex.constructor.name == "ProcessError") {
+                console.log(ex);
+                if (response)
+                    ex = new Error(response);
+                else
+                    ex = new Error(_("Failed to change password"));
+            }
+            dfd.reject(ex);
+        });
+
+    return dfd.promise();
+}
+
+/*
+ * Similar to $.when() but serializes, and accepts functions
+ * that return promises
+ */
+function chain(functions) {
+    var dfd = $.Deferred();
+    var i = 0;
+
+    /* Either an array or functions passed */
+    if (typeof functions == "function")
+        functions = arguments;
+
+    function step() {
+        if (i == functions.length) {
+            dfd.resolve();
+            return;
+        }
+
+        (functions[i])()
+            .done(function() {
+                step();
+            })
+            .fail(function(ex) {
+                dfd.reject(ex);
+            });
+
+        i += 1;
+    }
+
+    step();
+    return dfd.promise();
 }
 
 $(shell.default_permission).on("changed", update_accounts_privileged);
 
-function find_account(user_name, client)
-{
-    var account_objs = client.getObjectsFrom("/com/redhat/Cockpit/Accounts/");
-    var i, acc;
-
-    for (i = 0; i < account_objs.length; i++) {
-        acc = account_objs[i].lookup("com.redhat.Cockpit.Account");
-        if (acc && acc.UserName == user_name)
-            return acc;
+function parse_passwd_content(content, tag, error) {
+    if (content === null) {
+        console.warn("Couldn't read /etc/passwd", error);
+        return [ ];
     }
-    return null;
+
+    var ret = [ ];
+    var lines = content.split('\n');
+    var column;
+
+    for (var i = 0; i < lines.length; i++) {
+        if (! lines[i])
+            continue;
+        column = lines[i].split(':');
+        ret[i] = [];
+        ret[i]["name"] = column[0];
+        ret[i]["password"] = column[1];
+        ret[i]["uid"] = parseInt(column[2], 10);
+        ret[i]["gid"] = parseInt(column[3], 10);
+        ret[i]["gecos"] = column[4];
+        ret[i]["home"] = column[5];
+        ret[i]["shell"] = column[6];
+    }
+
+    return ret;
 }
 
-function fill_canvas(canvas, overlay, data, width, callback)
-{
-    var img = new window.Image();
-    img.onerror = function () {
-        shell.show_error_dialog(_("Can't use this file"), _("Can't read it."));
-    };
-    img.onload = function () {
-        canvas.width = width;
-        canvas.height = canvas.width * (img.height/img.width);
-        overlay.width = canvas.width;
-        overlay.height = canvas.height;
-        var ctxt = canvas.getContext("2d");
-        ctxt.clearRect(0, 0, canvas.width, canvas.height);
-        ctxt.drawImage(img, 0, 0, canvas.width, canvas.height);
-        callback ();
-    };
-    img.src = data;
+function parse_group_content(content, tag, error) {
+    if (content === null) {
+        console.warn("Couldn't read /etc/group", error);
+        return [ ];
+    }
+
+    var ret = [ ];
+    var lines = content.split('\n');
+    var column;
+
+    for (var i = 0; i < lines.length; i++) {
+        if (! lines[i])
+            continue;
+        column = lines[i].split(':');
+        ret[i] = [];
+        ret[i]["name"] = column[0];
+        ret[i]["password"] = column[1];
+        ret[i]["gid"] = parseInt(column[2], 10);
+        ret[i]["userlist"] = column[3].split(',');
+    }
+
+    return ret;
 }
 
-function canvas_data(canvas, x1, y1, x2, y2, width, height, format)
-{
-    var dest = $('<canvas/>')[0];
-    dest.width = width;
-    dest.height = height;
-    var dest_w, dest_h;
-    var img_w = x2 - x1, img_h = y2 - y1;
-    if (img_w > img_h) {
-        dest_w = width;
-        dest_h = dest_w * (img_h/img_w);
-    } else {
-        dest_h = height;
-        dest_w = dest_h * (img_w/img_h);
-    }
-    var ctxt = dest.getContext("2d");
-    ctxt.drawImage (canvas,
-                    x1, y1, img_w, img_h,
-                    (width - dest_w)/2, (height - dest_h)/2, dest_w, dest_h);
-    return dest.toDataURL(format);
+function password_quality(password) {
+    var dfd = $.Deferred();
+
+    cockpit.spawn('/usr/bin/pwscore', { "environ": ["LC_ALL=C"] })
+       .input(password)
+       .done(function(content) {
+           var quality = parseInt(content, 10);
+           if (quality === 0) {
+               dfd.reject(new Error(_("Password is too weak")));
+           } else if (quality <= 33) {
+               dfd.resolve("weak");
+           } else if (quality <= 66) {
+               dfd.resolve("okay");
+           } else if (quality <= 99) {
+               dfd.resolve("good");
+           } else {
+               dfd.resolve("excellent");
+           }
+       })
+       .fail(function() {
+           dfd.reject(new Error(_("Password is not acceptable")));
+       });
+
+    return dfd.promise();
 }
 
-shell.show_change_avatar_dialog = function show_change_avatar_dialog(file_input, callback)
-{
-    var files, file, reader;
-    files = $(file_input)[0].files;
-    if (files.length != 1)
-        return;
-    file = files[0];
-    if (!file.type.match("image.*")) {
-        shell.show_error_dialog(_("Can't upload this file"), _("It's not an image."));
-        return;
-    }
-    reader = new window.FileReader();
-    reader.onerror = function () {
-        shell.show_error_dialog(_("Can't upload this file"), _("Can't read it."));
-    };
-    reader.onload = function () {
-        var canvas = $('#account-change-avatar-canvas')[0];
-        var overlay = $('#account-change-avatar-overlay')[0];
-        fill_canvas(canvas, overlay, reader.result, 256,
-                          function () {
-                              PageAccountChangeAvatar.callback = callback;
-                              $('#account-change-avatar-dialog').modal('show');
-                          });
-    };
-    reader.readAsDataURL(file);
-};
-
-// XXX - make private
-
-function on_account_changes(client, id, func) {
-    function object_added(event, obj) {
-        if (obj.objectPath.indexOf("/com/redhat/Cockpit/Accounts/") === 0)
-            func();
+function is_user_in_group(user, group) {
+    for (var i = 0; group["userlist"] && i < group["userlist"].length; i++) {
+        if (group["userlist"][i] === user)
+            return true;
     }
 
-    function object_removed(event, obj) {
-        if (obj.objectPath.indexOf("/com/redhat/Cockpit/Accounts/") === 0)
-            func();
-    }
-
-    function properties_changed(event, obj) {
-        if (obj.objectPath.indexOf("/com/redhat/Cockpit/Accounts/") === 0)
-            func();
-    }
-
-    function signal_emitted(event, iface, signal, args) {
-        if (iface.getObject().objectPath.indexOf("/com/redhat/Cockpit/Accounts/") === 0 &&
-            signal == "Changed")
-            func();
-    }
-
-    $(client).on("objectAdded." + id, object_added);
-    $(client).on("objectRemoved." + id, object_removed);
-    $(client).on("propertiesChanged." + id, properties_changed);
-    $(client).on("signalEmitted." + id, signal_emitted);
-}
-
-function off_account_changes(client, id) {
-    $(client).off("." + id);
+    return false;
 }
 
 PageAccounts.prototype = {
@@ -173,66 +276,59 @@ PageAccounts.prototype = {
 
     setup: function() {
         $('#accounts-create').on('click', $.proxy (this, "create"));
-        update_accounts_privileged();
     },
 
     enter: function() {
-        /* TODO: This code needs to be migrated away from old dbus */
-        this.client = shell.dbus(null);
+        var self = this;
 
-        on_account_changes(this.client, "accounts", $.proxy(this, "update"));
-        this.update();
+        function parse_accounts(content) {
+            self.accounts = parse_passwd_content(content);
+            self.update();
+        }
+
+        this.handle_passwd =  cockpit.file('/etc/passwd');
+
+        this.handle_passwd.read()
+           .done(parse_accounts)
+           .fail(shell.show_unexpected_error);
+
+        this.handle_passwd.watch(parse_accounts);
     },
 
     leave: function() {
-        off_account_changes(this.client, "accounts");
-        this.client.release();
-        this.client = null;
+        if (this.handle_passwd) {
+            this.handle_passwd.close();
+            this.handle_passwd = null;
+        }
     },
 
     update: function() {
         var list = $("#accounts-list");
-        var account_objs = this.client.getObjectsFrom("/com/redhat/Cockpit/Accounts/");
-        var i, acc;
 
-        this.accounts = [ ];
-        for (i = 0; i < account_objs.length; i++) {
-            acc = account_objs[i].lookup("com.redhat.Cockpit.Account");
-            if (acc)
-                this.accounts.push(acc);
-        }
-
-        this.accounts.sort (function (a, b) { return a.RealName.localeCompare(b.RealName); } );
-
-        function set_avatar(acc, img) {
-            acc.call('GetIconDataURL',
-                     function (error, result) {
-                         if (result)
-                             img.attr('src', result);
-                     });
-        }
+        this.accounts.sort (function (a, b) {
+                                if (! a["gecos"]) return -1;
+                                else if (! b["gecos"]) return 1;
+                                else return a["gecos"].localeCompare(b["gecos"]);
+                            });
 
         list.empty();
-        for (i = 0; i < this.accounts.length; i++) {
-            acc = this.accounts[i];
+        for (var i = 0; i < this.accounts.length; i++) {
+            if ((this.accounts[i]["uid"] < 1000 && this.accounts[i]["uid"] !== 0) ||
+                  this.accounts[i]["shell"] == "/sbin/nologin")
+                continue;
             var img =
-                $('<img/>', { 'class': "cockpit-account-pic",
-                              'width': "48",
-                              'height': "48",
-                              'src': "images/avatar-default-48.png" });
+                $('<div/>', { 'class': "cockpit-account-pic pficon pficon-user" });
             var div =
                 $('<div/>', { 'class': "cockpit-account" }).append(
                     img,
-                    $('<div/>', { 'class': "cockpit-account-real-name" }).text(acc.RealName),
-                    $('<div/>', { 'class': "cockpit-account-user-name" }).text(acc.UserName));
-            div.on('click', $.proxy(this, "go", acc.UserName));
-            set_avatar (acc, img);
+                    $('<div/>', { 'class': "cockpit-account-real-name" }).text(this.accounts[i]["gecos"]),
+                    $('<div/>', { 'class': "cockpit-account-user-name" }).text(this.accounts[i]["name"]));
+            div.on('click', $.proxy(this, "go", this.accounts[i]["name"]));
             list.append(div);
         }
     },
 
     create: function () {
-        PageAccountsCreate.client = this.client;
         $('#accounts-create-dialog').modal('show');
     },
 
@@ -249,7 +345,6 @@ shell.pages.push(new PageAccounts());
 
 PageAccountsCreate.prototype = {
     _init: function() {
-        this.error_timeout = null;
         this.id = "accounts-create-dialog";
     },
 
@@ -259,9 +354,7 @@ PageAccountsCreate.prototype = {
     setup: function() {
         $('#accounts-create-cancel').on('click', $.proxy(this, "cancel"));
         $('#accounts-create-create').on('click', $.proxy(this, "create"));
-        $('#accounts-create-dialog .check-passwords').on('keydown', $.proxy(this, "update", "keydown"));
-        $('#accounts-create-dialog .check-passwords').on('input', $.proxy(this, "update", "input"));
-        $('#accounts-create-dialog input').on('focusout change', $.proxy(this, "update", "changeFocus"));
+        $('#accounts-create-dialog .check-passwords').on('keydown', $.proxy(this, "validate"));
     },
 
     enter: function() {
@@ -270,62 +363,58 @@ PageAccountsCreate.prototype = {
         $('#accounts-create-pw1').val("");
         $('#accounts-create-pw2').val("");
         $('#accounts-create-locked').prop('checked', false);
-        $('#accounts-create-message-password-mismatch').css("visibility", "hidden");
-        $("#account-set-password-dialog .check-passwords").removeClass("has-error");
-        this.update ();
+        $('#accounts-create-password-meter').removeClass("weak okay good excellent");
+        $("#accounts-create-dialog").dialog("failure", null);
     },
 
     leave: function() {
     },
 
-    update: function(behavior) {
-        function check_params ()
-        {
-            return ($('#accounts-create-user-name').val() !== "" &&
-                    $('#accounts-create-real-name').val() !== "" &&
-                    $('#accounts-create-pw1').val() !== "" &&
-                    $('#accounts-create-pw2').val() == $('#accounts-create-pw1').val());
+    validate: function() {
+        var ex, fails = [];
+        var pw = $('#accounts-create-pw1').val();
+        if ($('#accounts-create-pw2').val() != pw) {
+            ex = new Error(_("The passwords do not match"));
+            ex.target = "#accounts-create-pw2";
+            fails.push(ex);
+        }
+        if (!$('#accounts-create-user-name').val()) {
+            ex = new Error(_("No user name specified"));
+            ex.target = '#accounts-create-user-name';
+            fails.push(ex);
+        }
+        if (!$('#accounts-create-real-name').val()) {
+            ex = new Error(_("No real name specified"));
+            ex.target = '#accounts-create-real-name';
+            fails.push(ex);
         }
 
-        function highlight_error() {
-            $("#accounts-create-dialog .check-passwords").addClass("has-error");
-            $('#accounts-create-message-password-mismatch').css("visibility", "visible");
-        }
+        /* The first check is immediately complete */
+        var dfd = $.Deferred();
+        if (fails.length)
+            dfd.reject(fails);
+        else
+            dfd.resolve();
 
-        function hide_error() {
-            $("#accounts-create-dialog .check-passwords").removeClass("has-error");
-            $('#accounts-create-message-password-mismatch').css("visibility", "hidden");
-        }
+        var promise = password_quality(pw)
+            .fail(function(ex) {
+                ex.target = "#accounts-create-pw2";
+            })
+            .always(function(arg) {
+                var strength = this.state() == "resolved" ? arg : "weak";
+                var meter = $("#accounts-create-password-meter")
+                    .removeClass("weak okay good excellent");
+                if (pw)
+                    meter.addClass(strength);
+                var message = $("#accounts-create-password-meter-message");
+                if (strength == "excellent") {
+                    message.text(_("Excellent password"));
+                } else {
+                    message.text("");
+                }
+            });
 
-        function check_password_match() {
-            if ($('#accounts-create-pw2').val() !== "" &&
-                $('#accounts-create-pw1').val() !== $('#accounts-create-pw2').val())
-                highlight_error();
-            else
-                hide_error();
-        }
-
-        window.clearTimeout(this.error_timeout);
-        this.error_timeout = null;
-
-        if (behavior == "changeFocus") {
-            if ($('#accounts-create-pw2').val() !== "" &&
-                $('#accounts-create-pw1').val() !== $('#accounts-create-pw2').val())
-                highlight_error();
-            else
-                hide_error();
-        } else if (behavior == "input") {
-            if ($('#accounts-create-pw2').val() !== "" &&
-                !$('#accounts-create-pw1').val().startsWith($('#accounts-create-pw2').val()))
-                highlight_error();
-            else
-                hide_error();
-
-            this.error_timeout = window.setTimeout(check_password_match, 2000);
-            this.setTimeout = null;
-        }
-
-        $('#accounts-create-create').prop('disabled', !check_params());
+        return $.when(dfd, promise);
     },
 
     cancel: function() {
@@ -333,18 +422,49 @@ PageAccountsCreate.prototype = {
     },
 
     create: function() {
-        $('#accounts-create-dialog').modal('hide');
-        var manager = PageAccountsCreate.client.get ("/com/redhat/Cockpit/Accounts",
-                                                     "com.redhat.Cockpit.Accounts");
-        manager.call("CreateAccount",
-                     $('#accounts-create-user-name').val(),
-                     $('#accounts-create-real-name').val(),
-                     $('#accounts-create-pw1').val(),
-                     $('#accounts-create-locked').prop('checked'),
-                     function (error) {
-                         if (error)
-                             shell.show_unexpected_error(error);
-                     });
+        var tasks = [
+            function create_user() {
+                var prog = ["/usr/sbin/useradd"];
+                if ($('#accounts-create-real-name').val()) {
+                    prog.push('-c');
+                    prog.push($('#accounts-create-real-name').val());
+                }
+                prog.push($('#accounts-create-user-name').val());
+                return cockpit.spawn(prog, { "superuser": true });
+            }
+        ];
+
+        if ($('#accounts-create-locked').prop('checked')) {
+            tasks.push(function adjust_locked() {
+                return cockpit.spawn([
+                    "/usr/sbin/usermod",
+                    $('#accounts-create-user-name').val(),
+                    "--lock"
+                ], { superuser: true });
+            });
+        }
+
+        tasks.push(function change_passwd() {
+            return passwd_change($('#accounts-create-user-name').val(), $('#accounts-create-pw1').val());
+        });
+
+        var promise = this.validate()
+            .fail(function(ex) {
+                $("#accounts-create-password-meter-message").hide();
+                $("#accounts-create-dialog").dialog("failure", ex);
+            })
+            .done(function() {
+                promise = chain(tasks)
+                    .done(function() {
+                        $('#accounts-create-dialog').modal('hide');
+                    })
+                    .fail(function(ex) {
+                        $("#accounts-create-dialog").dialog("failure", ex);
+                    });
+                $("#accounts-create-dialog").dialog("wait", promise);
+            });
+
+        $("#accounts-create-dialog").dialog("wait", promise);
     }
 };
 
@@ -358,6 +478,7 @@ PageAccount.prototype = {
     _init: function() {
         this.id = "account";
         this.section_id = "accounts";
+        this.roles = [];
     },
 
     getTitle: function() {
@@ -368,8 +489,6 @@ PageAccount.prototype = {
     },
 
     setup: function() {
-        $('#account-pic').on('click', $.proxy (this, "trigger_change_avatar"));
-        $('#account-avatar-uploader').on('change', $.proxy (this, "change_avatar"));
         $('#account-real-name').on('change', $.proxy (this, "change_real_name"));
         $('#account-real-name').on('keydown', $.proxy (this, "real_name_edited"));
         $('#account-set-password').on('click', $.proxy (this, "set_password"));
@@ -379,63 +498,177 @@ PageAccount.prototype = {
         $('#account-locked').on('change', $.proxy (this, "change_locked"));
     },
 
-    enter: function() {
-        /* TODO: This code needs to be migrated away from old dbus */
-        this.client = shell.dbus(null);
+    get_user: function() {
+       var self = this;
+       function parse_user(content) {
+            var accounts = parse_passwd_content(content);
 
-        on_account_changes(this.client, "account", $.proxy(this, "update"));
-        this.real_name_dirty = false;
-        this.update ();
+            for (var i = 0; i < accounts.length; i++) {
+               if (accounts[i]["name"] !== shell.get_page_param('id'))
+                  continue;
+
+               self.account = accounts[i];
+               self.update();
+            }
+        }
+
+        this.handle_passwd = cockpit.file('/etc/passwd');
+
+        this.handle_passwd.read()
+           .done(parse_user)
+           .fail(shell.show_unexpected_error);
+
+        this.handle_passwd.watch(parse_user);
+    },
+
+    get_roles: function() {
+        var self = this;
+
+        function parse_groups(content) {
+            var i, j;
+            self.groups = parse_group_content(content);
+            while (self.roles.length > 0)
+                self.roles.pop();
+            for (i = 0, j = 0; i < self.groups.length; i++) {
+                if (self.groups[i]["name"] == "wheel" || self.groups[i]["name"] == "docker") {
+                   self.roles[j] = { };
+                   self.roles[j]["name"] = self.groups[i]["name"];
+                   self.roles[j]["desc"] = self.groups[i]["name"] == "wheel" ?
+                                           _("Server Administrator") :
+                                           _("Container Administrator");
+                   self.roles[j]["id"] = self.groups[i]["gid"];
+                   self.roles[j]["member"] = is_user_in_group(shell.get_page_param('id'), self.groups[i]);
+                   j++;
+                }
+            }
+            $(self).triggerHandler("roles");
+            self.update();
+        }
+
+        this.handle_groups = cockpit.file('/etc/group');
+
+        this.handle_groups.read()
+           .done(parse_groups)
+           .fail(shell.show_unexpected_error);
+
+        this.handle_groups.watch(parse_groups);
+    },
+
+    get_last_login: function() {
+        var self = this;
+
+        function parse_last_login(data) {
+           data = data.split('\n')[1]; // throw away header
+           if (data.length === 0) return null;
+           data =  data.split('   '); // get last column - separated by spaces
+
+           if (data[data.length - 1].indexOf('**Never logged in**') > -1)
+               return null;
+           else
+               return new Date(data[data.length - 1]);
+        }
+
+        cockpit.spawn(["/usr/bin/lastlog", "-u", shell.get_page_param('id')],
+                      { "environ": ["LC_ALL=C"] })
+           .done(function (data) { self.lastLogin = parse_last_login(data); self.update(); })
+           .fail(shell.show_unexpected_error);
+    },
+
+    get_locked: function() {
+        var self = this;
+
+        function parse_locked(content) {
+            self.locked = content.indexOf("Password locked.") > -1;
+            self.update();
+        }
+
+        cockpit.spawn(["/usr/bin/passwd", "-S", shell.get_page_param('id')],
+                      { "environ": [ "LC_ALL=C" ], "superuser": true })
+           .done(parse_locked);
+    },
+
+    get_logged: function() {
+        var self = this;
+
+        function parse_logged(content) {
+            self.logged = content.length > 0;
+            if (! self.logged)
+               self.get_last_login();
+            else
+               self.update();
+        }
+
+        cockpit.spawn(["/usr/bin/w", "-sh", shell.get_page_param('id')])
+           .done(parse_logged)
+           .fail(shell.show_unexpected_error);
+    },
+
+    enter: function() {
+        $("#account-real-name").removeAttr("data-dirty");
+
+        this.get_user();
+        this.get_roles();
+        this.get_locked();
+        this.get_logged();
     },
 
     leave: function() {
-        off_account_changes(this.client, "account");
-        this.client.release();
-        this.client = null;
+        if (this.handle_passwd) {
+           this.handle_passwd.close();
+           this.handle_passwd = null;
+        }
+
+        if (this.handle_groups) {
+           this.handle_groups.close();
+           this.handle_groups = null;
+        }
     },
 
     update: function() {
-        this.account = find_account(shell.get_page_param('id'), this.client);
-
         if (this.account) {
             var can_change = this.check_role_for_self_mod();
 
-            var manager = this.client.get ("/com/redhat/Cockpit/Accounts",
-                                           "com.redhat.Cockpit.Accounts");
-            this.sys_roles = manager.Roles || [ ];
+            var name = $("#account-real-name");
 
-            this.account.call('GetIconDataURL',
-                              function (error, result) {
-                                  if (result)
-                                      $('#account-pic').attr('src', result);
-                              });
-            $('#account-pic').attr('src', "images/avatar-default-128.png");
-            $('#account-pic').toggleClass('accounts-privileged', !can_change);
-            $('#account-real-name').attr('disabled', !can_change);
+            name.attr('disabled', !can_change || this.account["uid"] === 0);
+            $('#account-logout').attr('disabled', !this.logged);
 
-            if (!this.real_name_dirty)
-                $('#account-real-name').val(this.account.RealName);
-            $('#account-user-name').text(this.account.UserName);
-            if (this.account.LoggedIn)
+            if (!name.attr("data-dirty"))
+                $('#account-real-name').val(this.account["gecos"]);
+
+            $('#account-user-name').text(this.account["name"]);
+
+            if (this.logged)
                 $('#account-last-login').text(_("Logged In"));
-            else if (this.account.LastLogin === 0)
+            else if (! this.lastLogin)
                 $('#account-last-login').text(_("Never"));
             else
-                $('#account-last-login').text((new Date(this.account.LastLogin*1000)).toLocaleString());
-            $('#account-locked').prop('checked', this.account.Locked);
-            var groups = make_set(this.account.Groups);
-            var roles = "";
-            for (var i = 0; i < this.sys_roles.length; i++) {
-                if (this.sys_roles[i][0] in groups) {
+                $('#account-last-login').text(this.lastLogin.toLocaleString());
+
+            if (typeof this.locked != 'undefined' && this.account["uid"] !== 0) {
+                $('#account-locked').prop('checked', this.locked);
+                $('#account-locked').parents('tr').show();
+            } else {
+                $('#account-locked').parents('tr').hide();
+            }
+
+            if (this.account["uid"] !== 0) {
+                var roles = "";
+                for (var i = 0; this.roles && i < this.roles.length; i++) {
+                    if (! this.roles[i]["member"])
+                        continue;
                     if (roles !== "")
                         roles += "<br/>";
-                    roles += shell.esc(this.sys_roles[i][1]);
+
+                    roles += shell.esc(this.roles[i]["desc"]);
                 }
+                $('#account-roles').html(roles);
+                $('#account-roles').parents('tr').show();
+            } else {
+                $('#account-roles').parents('tr').hide();
             }
-            $('#account-roles').html(roles);
-            $('#account .breadcrumb .active').text(this.account.RealName);
+            $('#account .breadcrumb .active').text(this.account["gecos"]);
         } else {
-            $('#account-pic').attr('src', null);
             $('#account-real-name').val("");
             $('#account-user-name').text("");
             $('#account-last-login').text("");
@@ -446,94 +679,69 @@ PageAccount.prototype = {
         update_accounts_privileged();
     },
 
-    trigger_change_avatar: function() {
-        if (!this.check_role_for_self_mod ())
-            return;
-
-        if (window.File && window.FileReader)
-            $('#account-avatar-uploader').trigger('click');
-    },
-
-    change_avatar: function() {
-        var me = this;
-        shell.show_change_avatar_dialog('#account-avatar-uploader',
-                                        function (data) {
-                                            me.account.call('SetIconDataURL', data,
-                                                            function (error) {
-                                                                if (error)
-                                                                    shell.show_unexpected_error(error);
-                                                            });
-                                        });
-    },
-
     real_name_edited: function() {
-        this.real_name_dirty = true;
+        $("#account-real-name").attr("data-dirty", "true");
     },
 
     check_role_for_self_mod: function () {
-        return (this.account.UserName == cockpit.user["user"] ||
+        return (this.account["name"] == cockpit.user["user"] ||
                 shell.default_permission.allowed !== false);
     },
 
     change_real_name: function() {
-        var me = this;
+        var self = this;
 
-        this.real_name_dirty = false;
+        var name = $("#account-real-name");
+        name.attr("data-dirty", "true");
 
-        if (!me.check_role_for_self_mod ()) {
-            me.update ();
+        if (!self.check_role_for_self_mod ()) {
+            self.update ();
             return;
         }
 
-        this.account.call ('SetRealName', $('#account-real-name').val(),
-                           function (error) {
-                               if (error) {
-                                   shell.show_unexpected_error(error);
-                                   me.update ();
-                               }
-                           });
+        // TODO: unwanted chars check
+        var value = name.val();
+
+        cockpit.spawn(["/usr/sbin/usermod", self.account["name"], "--comment", value],
+                      { "superuser": true})
+           .done(function(data) {
+               self.account["gecos"] = value;
+               self.update();
+               name.removeAttr("data-dirty");
+           })
+           .fail(shell.show_unexpected_error);
     },
 
     change_locked: function() {
-        var me = this;
-
-        this.account.call ('SetLocked',
-                           $('#account-locked').prop('checked'),
-                           function (error) {
-                               if (error) {
-                                   shell.show_unexpected_error(error);
-                                   me.update ();
-                               }
-                           });
+        cockpit.spawn(["/usr/sbin/usermod",
+                       this.account["name"],
+                       $('#account-locked').prop('checked') ? "--lock" : "--unlock"], { "superuser": true})
+           .done($.proxy (this, "get_locked"))
+           .fail(shell.show_unexpected_error);
     },
 
     set_password: function() {
         if (!this.check_role_for_self_mod ())
             return;
 
-        PageAccountSetPassword.account = this.account;
-        PageAccountSetPassword.user_name = null;
+        PageAccountSetPassword.user_name = this.account["name"];
         $('#account-set-password-dialog').modal('show');
     },
 
     delete_account: function() {
-        PageAccountConfirmDelete.account = this.account;
+        PageAccountConfirmDelete.user_name = this.account["name"];
         $('#account-confirm-delete-dialog').modal('show');
     },
 
     logout_account: function() {
-        var me = this;
-        this.account.call('KillSessions',
-                          function (error) {
-                              if (error) {
-                                  shell.show_unexpected_error(error);
-                                  me.update ();
-                              }
-                          });
+        cockpit.spawn(["/usr/bin/loginctl", "kill-user", this.account["name"]], { "superuser": true})
+           .done($.proxy (this, "get_logged"))
+           .fail(shell.show_unexpected_error);
+
     },
 
     change_roles: function() {
-        PageAccountChangeRoles.account = this.account;
+        PageAccountChangeRoles.page = this;
         $('#account-change-roles-dialog').modal('show');
     }
 
@@ -546,170 +754,6 @@ function PageAccount() {
 shell.pages.push(new PageAccount());
 
 var crop_handle_width = 20;
-
-PageAccountChangeAvatar.prototype = {
-    _init: function() {
-        this.id = "account-change-avatar-dialog";
-    },
-
-    show: function() {
-    },
-
-    setup: function() {
-        var self = this;
-
-        $('#account-change-avatar-cancel').on('click', $.proxy(this, "cancel"));
-        $('#account-change-avatar-apply').on('click', $.proxy(this, "apply"));
-
-        var $canvas = $('#account-change-avatar-overlay');
-        this.canvas = $canvas[0];
-        this.canvas2d = this.canvas.getContext("2d");
-
-        $canvas.on('mousedown', function (ev) {
-            var offset = $canvas.offset();
-            var xoff = ev.pageX - offset.left - self.crop_x;
-            var yoff = ev.pageY - offset.top - self.crop_y;
-
-            var orig_x = self.crop_x;
-            var orig_y = self.crop_y;
-            var orig_s = self.crop_s;
-
-            var proj_sign, dx_sign, dy_sign, ds_sign;
-
-            var h_w = crop_handle_width;
-
-            if (xoff > 0 && yoff > 0 && xoff < self.crop_s && yoff < self.crop_s) {
-                if (xoff < h_w && yoff < h_w) {
-                    // top left
-                    proj_sign = 1;
-                    dx_sign = 1;
-                    dy_sign = 1;
-                    ds_sign = -1;
-                } else if (xoff > self.crop_s - h_w && yoff < h_w) {
-                    // top right
-                    proj_sign = -1;
-                    dx_sign = 0;
-                    dy_sign = -1;
-                    ds_sign = 1;
-                } else if (xoff < h_w && yoff > self.crop_s - h_w) {
-                    // bottom left
-                    proj_sign = -1;
-                    dx_sign = 1;
-                    dy_sign = 0;
-                    ds_sign = -1;
-                } else if (xoff > self.crop_s - h_w && yoff > self.crop_s - h_w) {
-                    // bottom right
-                    proj_sign = 1;
-                    dx_sign = 0;
-                    dy_sign = 0;
-                    ds_sign = 1;
-                } else {
-                    // center
-                    proj_sign = 0;
-                }
-
-                $('body').on('mousemove', function (ev) {
-                    var x = ev.pageX - offset.left - xoff;
-                    var y = ev.pageY - offset.top - yoff;
-                    if (proj_sign === 0)
-                        self.set_crop (x, y, orig_s, true);
-                    else {
-                        var d = Math.floor((x - orig_x + proj_sign * (y - orig_y)) / 2);
-                        self.set_crop (orig_x + dx_sign*d, orig_y + dy_sign*d, orig_s + ds_sign*d, false);
-                    }
-                });
-                $('body').on('mouseup', function (ev) {
-                    $('body').off('mouseup');
-                    $('body').off('mousemove');
-                });
-            }
-        });
-    },
-
-    enter: function() {
-        var me = this;
-        var size = Math.min (this.canvas.width, this.canvas.height);
-        this.set_crop ((this.canvas.width - size) / 2, (this.canvas.height - size) / 2, size, true);
-    },
-
-    leave: function() {
-    },
-
-    set_crop: function (x, y, s, fix) {
-        function clamp (low, val, high)
-        {
-            if (val < low)
-                return low;
-            if (val > high)
-                return high;
-            return val;
-        }
-
-        x = Math.floor(x);
-        y = Math.floor(y);
-        s = Math.floor(s);
-
-        var min_s = 2 * crop_handle_width;
-
-        if (fix) {
-            // move it until it fits
-            s = clamp (min_s, s, Math.min (this.canvas.width, this.canvas.height));
-            x = clamp (0, x, this.canvas.width - s);
-            y = clamp (0, y, this.canvas.height - s);
-        } else if (x < 0 || y < 0 || x + s > this.canvas.width || y + s > this.canvas.height || s < min_s)
-            return;
-
-        this.crop_x = x;
-        this.crop_y = y;
-        this.crop_s = s;
-
-        this.draw_crop (x, y, x+s, y+s);
-    },
-
-    draw_crop: function(x1,y1,x2,y2) {
-        var ctxt;
-
-        function draw_box (x1, y1, x2, y2)
-        {
-            ctxt.strokeStyle = 'black';
-            ctxt.strokeRect(x1+0.5, y1+0.5, x2-x1-1, y2-y1-1);
-            ctxt.strokeStyle = 'white';
-            ctxt.strokeRect(x1+1.5, y1+1.5, x2-x1-3, y2-y1-3);
-        }
-
-        ctxt = this.canvas2d;
-        ctxt.clearRect(0, 0, this.canvas.width, this.canvas.height);
-        ctxt.fillStyle = 'rgba(0,0,0,0.8)';
-        ctxt.fillRect(0, 0, this.canvas.width, this.canvas.height);
-        ctxt.clearRect(x1, y1, x2 - x1, y2 - y1);
-
-        var h_w = crop_handle_width;
-        draw_box (x1, y1, x1+h_w, y1+h_w);
-        draw_box (x2-h_w, y1, x2, y1+h_w);
-        draw_box (x1, y2-h_w, x1+h_w, y2);
-        draw_box (x2-h_w, y2-h_w, x2, y2);
-        draw_box (x1, y1, x2, y2);
-    },
-
-    cancel: function() {
-        $('#account-change-avatar-dialog').modal('hide');
-    },
-
-    apply: function() {
-        var data = canvas_data($('#account-change-avatar-canvas')[0],
-                                     this.crop_x, this.crop_y,
-                                     this.crop_x+this.crop_s, this.crop_y+this.crop_s,
-                                     128, 128, "image/png");
-        $('#account-change-avatar-dialog').modal('hide');
-        PageAccountChangeAvatar.callback (data);
-    }
-};
-
-function PageAccountChangeAvatar() {
-    this._init();
-}
-
-shell.dialogs.push(new PageAccountChangeAvatar());
 
 PageAccountChangeRoles.prototype = {
     _init: function() {
@@ -724,64 +768,65 @@ PageAccountChangeRoles.prototype = {
     },
 
     enter: function() {
-        var groups, r, g, i;
+        function update() {
+            var r, u;
+            var roles = $('#account-change-roles-roles');
 
-        this.client = PageAccountChangeRoles.account._client;
-        var manager = this.client.get ("/com/redhat/Cockpit/Accounts",
-                                       "com.redhat.Cockpit.Accounts");
-        this.sys_roles = manager.Roles || [ ];
+            roles.empty();
 
-        var list = $('<ul/>', { 'class': 'list-group' });
-        for (i = 0; i < this.sys_roles.length; i++) {
-            r = this.sys_roles[i][0];
-            list.append(
-                $('<li>', { 'class': 'list-group-item' }).append(
-                    $('<div>', { 'class': 'checkbox',
-                                 'style': 'margin:0px'
-                               }).append(
-                        $('<input/>', { type: "checkbox",
-                                        name: "account-role-checkbox-" + r,
-                                        id: "account-role-checkbox-" + r
-                                      }),
-                        $('<label/>', { "for": "account-role-checkbox-" + r }).text(
-                            this.sys_roles[i][1]))));
+            u = PageAccountChangeRoles.page.account;
+
+            for (var i = 0; i < PageAccountChangeRoles.page.roles.length; i++) {
+                r = PageAccountChangeRoles.page.roles[i];
+                roles.append(
+                      $('<li>', { 'class': 'list-group-item' }).append(
+                          $('<div>', { 'class': 'checkbox',
+                                       'style': 'margin:0px'
+                                     }).append(
+                              $('<input/>', { type: "checkbox",
+                                              name: "account-role-checkbox-" + r["id"],
+                                              id: "account-role-checkbox-" + r["id"],
+                                              checked: r["member"]
+                                            }),
+                              $('<label/>', { "for": "account-role-checkbox-" + r["id"] }).text(
+                                  r["desc"]))));
+            }
         }
 
-        var roles = $('#account-change-roles-roles');
-        roles.empty();
-        roles.append (list);
-
-        groups = make_set(PageAccountChangeRoles.account.Groups);
-        this.roles = { };
-        for (i = 0; i < this.sys_roles.length; i++) {
-            r = this.sys_roles[i][0];
-            if (r in groups)
-                this.roles[r] = true;
-            $('#account-role-checkbox-' + r).prop('checked', this.roles[r]? true: false);
-        }
+        $(PageAccountChangeRoles.page).on("roles", update);
+        update();
     },
 
     leave: function() {
+        $(PageAccountChangeRoles.page).off("roles");
     },
 
     apply: function() {
-        var i, r, checked;
-        var add = [ ];
-        var remove = [ ];
-        for (i = 0; i < this.sys_roles.length; i++) {
-            r = this.sys_roles[i][0];
-            checked = $('#account-role-checkbox-' + r).prop('checked');
-            if (checked && !this.roles[r])
-                add.push(r);
-            else if (!checked && this.roles[r])
-                remove.push(r);
+        var checked, r;
+        var new_roles = [ ];
+        var del_roles = [ ];
+
+        for (var i = 0; i < PageAccountChangeRoles.page.roles.length; i++) {
+            r = PageAccountChangeRoles.page.roles[i];
+            if ($('#account-role-checkbox-' + r["id"]).prop('checked') && ! r["member"])
+                new_roles.push(r["id"]);
+
+            if (! $('#account-role-checkbox-' + r["id"]).prop('checked') && r["member"])
+               del_roles.push(r["name"]);
         }
 
-        PageAccountChangeRoles.account.call ('ChangeGroups', add, remove,
-                                             function (error) {
-                                                 if (error)
-                                                     shell.show_unexpected_error(error);
-                                             });
+        if (new_roles.length > 0) {
+            cockpit.spawn(["/usr/sbin/usermod", PageAccountChangeRoles.page.account["name"],
+                           "-G", new_roles.toString(), "-a"], { "superuser": true })
+               .fail(shell.show_unexpected_error);
+        }
+
+        for (var j = 0; j < del_roles.length; j++) {
+            cockpit.spawn(["/usr/bin/gpasswd", "-d", PageAccountChangeRoles.page.account["name"],
+                           del_roles[j]], { "superuser": true })
+                   .fail(shell.show_unexpected_error);
+        }
+
         $('#account-change-roles-dialog').modal('hide');
     }
 };
@@ -806,21 +851,26 @@ PageAccountConfirmDelete.prototype = {
 
     enter: function() {
         $('#account-confirm-delete-files').prop('checked', false);
-        $('#account-confirm-delete-title').text(cockpit.format(_("Delete $0"), PageAccountConfirmDelete.account.UserName));
+        $('#account-confirm-delete-title').text(cockpit.format(_("Delete $0"), PageAccountConfirmDelete.user_name));
     },
 
     leave: function() {
     },
 
     apply: function() {
-        PageAccountConfirmDelete.account.call ('Delete',
-                                               $('#account-confirm-delete-files').prop('checked'),
-                                               function (error) {
-                                                   if (error)
-                                                       shell.show_unexpected_error(error);
-                                               });
-        $('#account-confirm-delete-dialog').modal('hide');
-        cockpit.location = "accounts";
+        var prog = ["/usr/sbin/userdel"];
+
+        if ($('#account-confirm-delete-files').prop('checked'))
+            prog.push("-r");
+
+        prog.push(PageAccountConfirmDelete.user_name);
+
+        cockpit.spawn(prog, { "superuser": true })
+           .done(function () {
+              $('#account-confirm-delete-dialog').modal('hide');
+              cockpit.location = "accounts";
+           })
+           .fail(shell.show_unexpected_error);
     }
 };
 
@@ -832,93 +882,95 @@ shell.dialogs.push(new PageAccountConfirmDelete());
 
 PageAccountSetPassword.prototype = {
     _init: function() {
-        this.error_timeout = null;
         this.id = "account-set-password-dialog";
     },
 
     show: function() {
-        $('#account-set-password-pw1').focus();
+        if (cockpit.user["user"] !== PageAccountSetPassword.user_name) {
+            $('#account-set-password-old').parents('tr').toggle(false);
+            $('#account-set-password-pw1').focus();
+        } else {
+            $('#account-set-password-old').parents('tr').toggle(true);
+            $('#account-set-password-old').focus();
+        }
     },
 
     setup: function() {
         $('#account-set-password-apply').on('click', $.proxy(this, "apply"));
-        $('#account-set-password-dialog .check-passwords').on('keydown', $.proxy(this, "update", "keydown"));
-        $('#account-set-password-dialog .check-passwords').on('input', $.proxy(this, "update", "input"));
-        $('#account-set-password-dialog input').on('focusout change', $.proxy(this, "update", "changeFocus"));
+        $('#account-set-password-dialog .check-passwords').on('keydown', $.proxy(this, "validate"));
     },
 
     enter: function() {
+        $('#account-set-password-old').val("");
         $('#account-set-password-pw1').val("");
         $('#account-set-password-pw2').val("");
-        $('#account-set-password-message-password-mismatch').css("visibility", "hidden");
-        $("#account-set-password-dialog .check-passwords").removeClass("has-error");
-        this.update ();
+        $('#account-set-password-meter').removeClass("weak okay good excellent");
+        $("#account-set-password-dialog").dialog("failure", null);
     },
 
     leave: function() {
     },
 
-    update: function(behavior) {
-        function check_params ()
-        {
-            return ($('#account-set-password-pw1').val() !== "" &&
-                    $('#account-set-password-pw2').val() == $('#account-set-password-pw1').val());
+    validate: function() {
+        var ex;
+        var pw = $('#account-set-password-pw1').val();
+        if ($('#account-set-password-pw2').val() != pw) {
+            ex = new Error(_("The passwords do not match"));
+            ex.target = "#account-set-password-pw2";
         }
 
-        function highlight_error() {
-            $("#account-set-password-dialog .check-passwords").addClass("has-error");
-            $('#account-set-password-message-password-mismatch').css("visibility", "visible");
-        }
+        var dfd = $.Deferred();
+        if (ex)
+            dfd.reject(ex);
+        else
+            dfd.resolve();
 
-        function hide_error() {
-            $("#account-set-password-dialog .check-passwords").removeClass("has-error");
-            $('#account-set-password-message-password-mismatch').css("visibility", "hidden");
-        }
+        var promise = password_quality(pw)
+            .fail(function(ex) {
+                ex.target = "#account-set-password-pw2";
+            })
+            .always(function(arg) {
+                var strength = (this.state() == "resolved") ? arg : "weak";
+                var meter = $("#account-set-password-meter")
+                    .removeClass("weak okay good excellent");
+                if (pw)
+                    meter.addClass(strength);
+                var message = $("#account-set-password-meter-message");
+                if (strength == "excellent") {
+                    message.text(_("Excellent password"));
+                } else {
+                    message.text("");
+                }
+            });
 
-        function check_password_match() {
-            if ($('#account-set-password-pw2').val() !== "" &&
-                $('#account-set-password-pw1').val() !== $('#account-set-password-pw2').val())
-                highlight_error();
-            else
-                hide_error();
-        }
-
-        window.clearTimeout(this.error_timeout);
-        this.error_timeout = null;
-
-        if (behavior == "changeFocus") {
-            if ($('#account-set-password-pw2').val() !== "" &&
-                $('#account-set-password-pw1').val() !== $('#account-set-password-pw2').val())
-                highlight_error();
-            else
-                hide_error();
-        } else if (behavior == "input") {
-            if ($('#account-set-password-pw2').val() !== "" &&
-                !$('#account-set-password-pw1').val().startsWith($('#account-set-password-pw2').val()))
-                highlight_error();
-            else
-                hide_error();
-
-            this.error_timeout = window.setTimeout(check_password_match, 2000);
-            this.setTimeout = null;
-        }
-
-        $('#account-set-password-apply').prop('disabled', !check_params());
+        return $.when(dfd, promise);
     },
 
     apply: function() {
-        $('#account-set-password-dialog').modal('hide');
-        if (PageAccountSetPassword.account) {
-            PageAccountSetPassword.account.call ('SetPassword', $('#account-set-password-pw1').val(),
-                                                 function (error) {
-                                                     if (error)
-                                                         shell.show_unexpected_error(error);
-                                                 });
-        } else if (PageAccountSetPassword.user_name) {
-            cockpit.spawn([ "passwd", "--stdin", PageAccountSetPassword.user_name ]).
-                          write($('#account-set-password-pw1').val()).
-                          fail(shell.show_unexpected_error);
-        }
+        var promise = this.validate()
+            .done(function() {
+                var user = PageAccountSetPassword.user_name;
+                var password = $('#account-set-password-pw1').val();
+
+                if (cockpit.user["user"] === user)
+                    promise = passwd_self($('#account-set-password-old').val(), password);
+                else
+                    promise = passwd_change(user, password);
+
+                promise
+                    .done(function() {
+                        $('#account-set-password-dialog').modal('hide');
+                    })
+                    .fail(function(ex) {
+                        $("#account-set-password-dialog").dialog("failure", ex);
+                    });
+                $("#account-set-password-dialog").dialog("wait", promise);
+            })
+            .fail(function(ex) {
+                $("#account-set-password-meter-message").hide();
+                $("#account-set-password-dialog").dialog("failure", ex);
+            });
+        $("#account-set-password-dialog").dialog("wait", promise);
     }
 };
 
@@ -928,4 +980,9 @@ function PageAccountSetPassword() {
 
 shell.dialogs.push(new PageAccountSetPassword());
 
-})(jQuery, cockpit, shell);
+shell.change_password = function change_password() {
+    PageAccountSetPassword.user_name = cockpit.user["user"];
+    $('#account-set-password-dialog').modal('show');
+};
+
+});

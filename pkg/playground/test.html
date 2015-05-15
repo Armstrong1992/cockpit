@@ -5,7 +5,7 @@
     <title>Cockpit terminal</title>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <link href="../base1/cockpit.css" type="text/css" rel="stylesheet">
-    <script src="../base1/cockpit.js"></script>
+    <script src="../base1/require.js"></script>
 </head>
 <body style="display: none;">
     <div id="internal" class="container-fluid">
@@ -41,7 +41,7 @@
 require([
     'jquery',
     'base1/cockpit',
-    'playground/po'
+    'translated!playground/po'
 ], function($, cockpit, po) {
     cockpit.locale(po);
     var _ = cockpit.gettext;
@@ -61,7 +61,7 @@ require([
                  $(".cockpit-internal-reauthorize span").text("result: authorized");
              }).
              fail(function() {
-                 $(".cockpit-internal-reauthorize span").text("result: not-authorized");
+                 $(".cockpit-internal-reauthorize span").text("result: access-denied");
              });
          });
 
@@ -117,12 +117,14 @@ require([
         $('#file-error').text(error.toString());
     }
 
-    function changed(content, tag) {
+    function changed(content, tag, error) {
+        if (error)
+            return complain(error);
         $('#file-content').text(normalize_counter(content).counter);
         $('#file-error').empty();
     }
 
-    counter.watch(changed, complain);
+    counter.watch(changed);
 
     $('#modify-file').click(function () {
         counter

@@ -20,8 +20,8 @@
 $ ln -snf $(pwd) ~/.local/share/cockpit/playground
 $ sudo systemctl restart cockpit</pre>
 </li>
-            <li>Go to <code>http://localhost:9090/#playground</code></li>
             <li>Log into cockpit using your web browser, with the same account as the above.</li>
+            <li>Choose this item from the sidebar menu</li>
             <li>Feel free to edit this file and refresh in the browser.</li>
         </ol>
     </div>
@@ -29,7 +29,7 @@ $ sudo systemctl restart cockpit</pre>
     <div class="container-fluid">
         <table class="cockpit-form-table">
             <tr>
-                <td>URL</td>
+                <td><label class="control-label" for="address">URL</label></td>
                 <td><input class="form-control" id="address" value="8.8.8.8"></td>
             </tr>
             <tr>
@@ -63,7 +63,7 @@ $ sudo systemctl restart cockpit</pre>
             var options = {
                 "payload": "stream",
                 "spawn": [ "ping", address.value ],
-                "error": "output",
+                "err": "out",
             };
             channel = cockpit.channel(options);
             channel.onmessage = function(ev, data) {

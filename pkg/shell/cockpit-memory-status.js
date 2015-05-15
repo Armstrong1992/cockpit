@@ -17,13 +17,16 @@
  * along with Cockpit; If not, see <http://www.gnu.org/licenses/>.
  */
 
-/* global jQuery   */
-/* global cockpit  */
-/* global _        */
-/* global C_       */
+define([
+    "jquery",
+    "base1/cockpit",
+    "shell/shell",
+    "shell/cockpit-main"
+], function($, cockpit, shell) {
+"use strict";
 
-var shell = shell || { };
-(function($, cockpit, shell) {
+var _ = cockpit.gettext;
+var C_ = cockpit.gettext;
 
 PageMemoryStatus.prototype = {
     _init: function() {
@@ -35,10 +38,8 @@ PageMemoryStatus.prototype = {
     },
 
     enter: function() {
-        /* TODO: This code needs to be migrated away from old dbus */
-        this.client = shell.dbus(null);
+        var self = this;
 
-        var resmon = this.client.get("/com/redhat/Cockpit/MemoryMonitor", "com.redhat.Cockpit.ResourceMonitor");
         var options = {
             series: {shadowSize: 0, // drawing is faster without shadows
                      lines: {lineWidth: 0.0, fill: true}
@@ -55,17 +56,43 @@ PageMemoryStatus.prototype = {
                             [2.0*60, "3 min"],
                             [3.0*60, "2 min"],
                             [4.0*60, "1 min"]]},
+            legend: { show: true },
             x_rh_stack_graphs: true
         };
 
-        this.plot = shell.setup_complicated_plot("#memory_status_graph",
-                                                   resmon,
-                                                   [{color: "rgb(200,200,200)"},
-                                                    {color: "rgb(150,150,150)"},
-                                                    {color: "rgb(100,100,100)"},
-                                                    {color: "rgb( 50, 50, 50)"}
-                                                   ],
-                                                   options);
+        var metrics = [
+            { name: "memory.swap-used" },
+            { name: "memory.cached" },
+            { name: "memory.used" },
+            { name: "memory.free" },
+        ];
+
+        var series = [
+            { color: "#e41a1c", label: _("Swap Used") },
+            { color: "#ff7f00", label: _("Cached") },
+            { color: "#377eb8", label: _("Used") },
+            { color: "#4daf4a", label: _("Free") },
+        ];
+
+        self.channel = cockpit.metrics(1000, {
+            source: "internal",
+            metrics: metrics,
+            cache: "memory-status"
+        });
+
+        /* The grid shows us the last five minutes */
+        self.grid = cockpit.grid(1000, -300, -0);
+
+        var i;
+        for(i = 0; i < series.length; i++) {
+            series[i].row = self.grid.add(self.channel, [ metrics[i].name ]);
+        }
+
+        /* Start pulling data, and make the grid follow the data */
+        self.channel.follow();
+        self.grid.walk();
+
+        this.plot = shell.setup_complicated_plot("#memory_status_graph", self.grid, series, options);
     },
 
     show: function() {
@@ -74,8 +101,8 @@ PageMemoryStatus.prototype = {
 
     leave: function() {
         this.plot.destroy();
-        this.client.release();
-        this.client = null;
+        this.channel.close();
+        this.channel = null;
     }
 };
 
@@ -85,4 +112,4 @@ function PageMemoryStatus() {
 
 shell.pages.push(new PageMemoryStatus());
 
-})(jQuery, cockpit, shell);
+});

@@ -5,8 +5,14 @@ noinst_LIBRARIES += \
 	$(NULL)
 
 libcockpit_bridge_a_SOURCES = \
+	src/bridge/cockpitblocksamples.c \
+	src/bridge/cockpitblocksamples.h \
+	src/bridge/cockpitcgroupsamples.c \
+	src/bridge/cockpitcgroupsamples.h \
 	src/bridge/cockpitchannel.c \
 	src/bridge/cockpitchannel.h \
+	src/bridge/cockpitcpusamples.c \
+	src/bridge/cockpitcpusamples.h \
 	src/bridge/cockpitdbuscache.c \
 	src/bridge/cockpitdbuscache.h \
 	src/bridge/cockpitdbusinternal.h \
@@ -15,8 +21,11 @@ libcockpit_bridge_a_SOURCES = \
 	src/bridge/cockpitdbusjson.h \
 	src/bridge/cockpitdbusrules.c \
 	src/bridge/cockpitdbusrules.h \
+	src/bridge/cockpitdbussetup.c \
 	src/bridge/cockpitdbustime.c \
 	src/bridge/cockpitdbususer.c \
+	src/bridge/cockpitdisksamples.c \
+	src/bridge/cockpitdisksamples.h \
 	src/bridge/cockpitechochannel.c \
 	src/bridge/cockpitechochannel.h \
 	src/bridge/cockpithttpstream.c \
@@ -25,26 +34,36 @@ libcockpit_bridge_a_SOURCES = \
 	src/bridge/cockpitinteracttransport.h \
 	src/bridge/cockpitpackages.c \
 	src/bridge/cockpitpackages.h \
+	src/bridge/cockpitinternalmetrics.c \
+	src/bridge/cockpitinternalmetrics.h \
 	src/bridge/cockpitpaths.c \
 	src/bridge/cockpitpaths.h \
+	src/bridge/cockpitpipechannel.c \
+	src/bridge/cockpitpipechannel.h \
 	src/bridge/cockpitpolkitagent.c \
 	src/bridge/cockpitpolkitagent.h \
 	src/bridge/cockpitportal.c \
 	src/bridge/cockpitportal.h \
+	src/bridge/cockpitmemorysamples.c \
+	src/bridge/cockpitmemorysamples.h \
 	src/bridge/cockpitmetrics.c \
 	src/bridge/cockpitmetrics.h \
+	src/bridge/cockpitnetdevsamples.c \
+	src/bridge/cockpitnetdevsamples.h \
+	src/bridge/cockpitnetworksamples.c \
+	src/bridge/cockpitnetworksamples.h \
 	src/bridge/cockpitnullchannel.c \
 	src/bridge/cockpitnullchannel.h \
-	src/bridge/cockpitstream.c \
-	src/bridge/cockpitstream.h \
+	src/bridge/cockpitsamples.c \
+	src/bridge/cockpitsamples.h \
 	src/bridge/cockpitfsread.c \
 	src/bridge/cockpitfsread.h \
-	src/bridge/cockpitfswrite.c \
-	src/bridge/cockpitfswrite.h \
+	src/bridge/cockpitfsreplace.c \
+	src/bridge/cockpitfsreplace.h \
 	src/bridge/cockpitfswatch.c \
 	src/bridge/cockpitfswatch.h \
-	src/bridge/cockpitfsdir.c \
-	src/bridge/cockpitfsdir.h \
+	src/bridge/cockpitfslist.c \
+	src/bridge/cockpitfslist.h \
 	src/bridge/deprecated/cockpitdbusjson1.c \
 	src/bridge/deprecated/cockpitdbusjson1.h \
 	$(NULL)
@@ -127,13 +146,14 @@ BRIDGE_CHECKS = \
 	test-rules \
 	test-channel \
 	test-dbusjson \
-	test-stream \
+	test-pipe-channel \
 	test-packages \
 	test-fs \
 	test-metrics \
 	test-pcp \
 	test-pcp-archives \
 	test-httpstream \
+	test-setup \
 	$(NULL)
 
 noinst_DATA += mock-pmda.so
@@ -144,7 +164,7 @@ CLEANFILES += mock-pmda.so
 # for this.
 #
 mock-pmda.so: src/bridge/mock-pmda.c
-	$(AM_V_CCLD) gcc -g -fPIC -shared \
+	$(AM_V_CCLD) $(CC) -fPIC -shared \
 		-DSRCDIR=\"$(abs_srcdir)\" \
 		-o mock-pmda.so $(srcdir)/src/bridge/mock-pmda.c -lpcp_pmda -lpcp
 
@@ -172,11 +192,15 @@ test_rules_SOURCES = src/bridge/test-rules.c
 test_rules_CFLAGS = $(libcockpit_bridge_a_CFLAGS)
 test_rules_LDADD = $(libcockpit_bridge_LIBS)
 
-test_stream_SOURCES = \
-	src/bridge/test-stream.c \
+test_setup_SOURCES = src/bridge/test-setup.c
+test_setup_CFLAGS = $(libcockpit_bridge_a_CFLAGS)
+test_setup_LDADD = $(libcockpit_bridge_LIBS)
+
+test_pipe_channel_SOURCES = \
+	src/bridge/test-pipe-channel.c \
 	src/bridge/mock-transport.c src/bridge/mock-transport.h
-test_stream_CFLAGS = $(libcockpit_bridge_a_CFLAGS)
-test_stream_LDADD = $(libcockpit_bridge_LIBS)
+test_pipe_channel_CFLAGS = $(libcockpit_bridge_a_CFLAGS)
+test_pipe_channel_LDADD = $(libcockpit_bridge_LIBS)
 
 test_fs_SOURCES = \
 	src/bridge/test-fs.c \
@@ -213,6 +237,9 @@ TESTS += $(BRIDGE_CHECKS)
 
 EXTRA_DIST += \
 	src/bridge/mock-resource \
+	src/bridge/mock-setup \
 	src/bridge/mock-pmda.c \
 	src/bridge/mock-pmns \
+	src/bridge/mock-client.crt \
+	src/bridge/mock-client.key \
 	$(NULL)

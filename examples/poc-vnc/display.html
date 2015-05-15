@@ -20,9 +20,11 @@
 <script src="include/jsunzip.js"></script>
 <script src="include/rfb.js"></script>
 
-<script src="../base1/cockpit.js"></script>
+<script src="../base1/require.js"></script>
 <script>
-require(['base1/cockpit'], function(cockpit) {
+require([
+    'base1/cockpit'
+], function(cockpit) {
     $("#connect").on("click", function() {
         $("canvas").show();
         $("table").hide();
@@ -71,7 +73,7 @@ require(['base1/cockpit'], function(cockpit) {
 
         <table class="cockpit-form-table">
             <tr>
-                <td>Local port</td>
+                <td><label class="control-label" for="port">Local port</label></td>
                 <td><input class="form-control" id="port" value="5900" style="width: 100px"></td>
             </tr>
             <tr>

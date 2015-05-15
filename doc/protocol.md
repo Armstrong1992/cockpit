@@ -77,10 +77,10 @@ open until the "init" message has been received.
 
 The following fields are defined:
 
- * "version": The version of the protocol. Currently zero, and unstable.
- * "capabilities": An array of capability strings
+ * "version": The version of the protocol. Currently 1, and stable.
+ * "capabilities": Optional array of strings advertizing capabilities.
  * "channel-seed": A seed to be used when generating new channel ids.
- * "default-host": The default host to put in "open" messages.
+ * "host": The host being communicated with.
  * "problem": A problem occurred during init.
 
 If a problem occurs that requires shutdown of a transport, then the "problem"
@@ -102,6 +102,8 @@ The following fields are defined:
  * "host": The destination host for the channel, defaults to "localhost"
  * "user": Optional alternate user for authenticating with host
  * "superuser": When true, try to run this channel as root.
+ * "group": A group that can later be used with the "kill" command.
+ * "capabilities": Optional, array of capability strings required from the bridge
 
 If "binary" is set then this channel transfers binary messages. If "binary"
 is set to "base64" then messages in the channel are encoded using "base64",
@@ -140,7 +142,7 @@ The channel id must be set.  An example of a close:
     {
         "command": "close",
         "channel" : "5x",
-        "problem": "not-authorized"
+        "problem": "access-denied"
     }
 
 Any protocol participant can send this message. The cockpit-bridge and cockpit-ws
@@ -228,6 +230,21 @@ Example authorize challenge and response messages:
         "cookie": "555",
         "response": "crypt1:$6$r0oetn2039ntoen..."
     }
+
+Command: kill
+-------------
+
+The "kill" command terminates a whole set of channels. It is sent by the frontend
+and processed by cockpit-ws.
+
+The following fields are defined:
+
+ * "host": optional string kills channels with the given host
+ * "group": optional string to select only channels opened with the given "group"
+
+If no fields are specified then all channels are terminated. The "kill" command
+is not forwarded.
+
 
 Command: logout
 ---------------
@@ -486,10 +503,8 @@ are added automatically as appropriate, and others are stripped from
 the response, in particular 'Content-Length':
 
  * 'Accept-Charset'
- * 'Accept-Encoding'
  * 'Accept-Ranges'
  * 'Connection'
- * 'Content-Encoding'
  * 'Content-Length'
  * 'Content-MD5'
  * 'Content-Range'
@@ -499,11 +514,17 @@ the response, in particular 'Content-Length':
  * 'Transfer-Encoding'
  * 'Upgrade'
 
+The following are not accepted on non-binary channels:
+
+ * 'Accept-Encoding'
+ * 'Content-Encoding'
+
 Additional "open" command options are needed to open a channel of this
 payload type:
 
  * "unix": Open a channel with the given unix socket.
  * "port": Open a channel with the given TCP port on localhost.
+ * "tls": Set to a (currently empty) object to use an https connection.
 
 You may also specify these options:
 
@@ -540,8 +561,9 @@ You can't specify both "unix" and "spawn" together. When "spawn" is set the
 following options can be specified:
 
  * "directory": The directory to spawn the process in.
- * "error": If "spawn" is set, and "error" is set to "output", then stderr
-   is included in the payload data. If "pty" is set then stderr is always
+ * "err": If "spawn" is set, and "err" is set to "out", then stderr
+   is included in the payload data. If "err" is set to "ignore" then, the
+   stderr output will be discarded. If "pty" is set then stderr is always
    included.
  * "environ": This is a list of additional environment variables for the new
    spawned process. The variables are in the form of "NAME=VALUE". The default
@@ -586,7 +608,7 @@ might have the following additional fields:
 
  * "message": A string in the current locale describing the error.
 
-Payload: fsdir1
+Payload: fslist1
 ---------------
 
 A channel of this type lists the files in a directory and will watch
@@ -644,10 +666,10 @@ fields:
  * "tag": The transaction tag for the returned file content.  The tag
    for a non-existing file is "-".
 
-It is not permitted to send data in an fsdir1 channel. This channel
-sends an "done" when all file data was sent.
+It is not permitted to send data in an fslist1 channel. This channel
+sends a "done" when all file data was sent.
 
-Payload: fswrite1
+Payload: fsreplace1
 -----------------
 
 Replace the content of a file.
@@ -662,7 +684,7 @@ The following options can be specified in the "open" control message:
    express that you expect the file to not exist, use "-" as the tag.
 
 You should write the new content to the channel as one or more
-messages.  To indicate the end of the content, send an "done" message.
+messages.  To indicate the end of the content, send a "done" message.
 
 If you don't send any content messages before sending "done", the file
 will be removed.  To create an empty file, send at least one content
@@ -923,7 +945,8 @@ doubt use "internal-error".
  * "internal-error"
  * "no-cockpit"
  * "no-session"
- * "not-authorized"
+ * "access-denied"
+ * "authentication-failed"
  * "not-found"
  * "terminated"
  * "timeout"

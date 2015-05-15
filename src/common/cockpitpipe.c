@@ -255,6 +255,8 @@ dispatch_input (gint fd,
         }
     }
 
+  g_byte_array_set_size (self->priv->in_buffer, len + ret);
+
   if (ret == 0)
     {
       g_debug ("%s: end of input", self->priv->name);
@@ -262,8 +264,6 @@ dispatch_input (gint fd,
     }
 
   g_object_ref (self);
-
-  g_byte_array_set_size (self->priv->in_buffer, len + ret);
 
   eof = (self->priv->in_source == NULL);
   g_signal_emit (self, cockpit_pipe_sig_read, 0, self->priv->in_buffer, eof);
@@ -320,7 +320,7 @@ set_problem_from_connect_errno (CockpitPipe *self,
   const gchar *problem = NULL;
 
   if (errn == EPERM || errn == EACCES)
-    problem = "not-authorized";
+    problem = "access-denied";
   else if (errn == ENOENT || errn == ECONNREFUSED)
     problem = "not-found";
 
@@ -906,7 +906,8 @@ cockpit_pipe_connect (const gchar *name,
 }
 
 static GSpawnFlags
-calculate_spawn_flags (const gchar **env)
+calculate_spawn_flags (const gchar **env,
+                       CockpitPipeFlags pflags)
 {
   GSpawnFlags flags = G_SPAWN_DO_NOT_REAP_CHILD;
   gboolean path_flag = FALSE;
@@ -923,6 +924,9 @@ calculate_spawn_flags (const gchar **env)
 
   if (!path_flag)
     flags |= G_SPAWN_SEARCH_PATH;
+
+  if (pflags & COCKPIT_PIPE_STDERR_TO_NULL)
+    flags |= G_SPAWN_STDERR_TO_DEV_NULL;
 
   return flags;
 }
@@ -1033,7 +1037,7 @@ cockpit_pipe_spawn (const gchar **argv,
   GPid pid = 0;
 
   g_spawn_async_with_pipes (directory, (gchar **)argv, (gchar **)env,
-                            calculate_spawn_flags (env),
+                            calculate_spawn_flags (env, flags),
                             (flags & COCKPIT_PIPE_STDERR_TO_STDOUT) ? stderr_to_stdout : NULL, NULL,
                             &pid, &session_stdin, &session_stdout,
                             (flags & COCKPIT_PIPE_STDERR_TO_LOG) ? &session_stderr : NULL, &error);
@@ -1058,7 +1062,7 @@ cockpit_pipe_spawn (const gchar **argv,
         problem = "not-found";
       else if (g_error_matches (error, G_SPAWN_ERROR, G_SPAWN_ERROR_PERM) ||
                g_error_matches (error, G_SPAWN_ERROR, G_SPAWN_ERROR_ACCES))
-        problem = "not-authorized";
+        problem = "access-denied";
 
       if (problem)
         {

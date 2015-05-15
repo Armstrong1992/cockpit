@@ -25,6 +25,7 @@
 #include "common/cockpitpipetransport.h"
 
 #include <sys/wait.h>
+#include <string.h>
 
 /**
  * CockpitPortal:
@@ -179,7 +180,7 @@ on_other_closed (CockpitTransport *transport,
       if (WIFEXITED (status))
         {
            if (WEXITSTATUS (status) == 127 || WEXITSTATUS (status) == 126)
-             problem = "not-authorized";
+             problem = "access-denied";
         }
     }
 
@@ -206,6 +207,7 @@ static void
 open_portal (CockpitPortal *self)
 {
   CockpitPipe *pipe;
+  const gchar *data;
 
   if (self->other)
     return;
@@ -221,8 +223,13 @@ open_portal (CockpitPortal *self)
   self->other_closed_sig = g_signal_connect (self->other, "closed", G_CALLBACK (on_other_closed), self);
   self->channels = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, NULL);
 
-  if (self->last_init)
-    cockpit_transport_send (self->other, NULL, self->last_init);
+  if (!self->last_init)
+    {
+      data = "{\"command\":\"init\",\"version\":1}";
+      self->last_init = g_bytes_new_static (data, strlen (data));
+    }
+
+  cockpit_transport_send (self->other, NULL, self->last_init);
 }
 
 static gboolean

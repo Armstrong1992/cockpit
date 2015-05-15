@@ -21,6 +21,11 @@ set -e
 LANG=C
 export LANG
 
+TEST_OS=${TEST_OS:-fedora-22}
+TEST_ARCH=${TEST_ARCH:-x86_64}
+export TEST_OS
+export TEST_ARCH
+
 if which "parallel" >/dev/null 2>/dev/null; then
   RUNNER="parallel --gnu -j ${TEST_JOBS:-1}"
 else
@@ -31,7 +36,6 @@ $RUNNER <<EOF
 ./check-dbus
 ./check-login
 ./check-dashboard TestDashboard.testBasic
-./check-dashboard TestDashboard.testHostSwitcher
 ./check-dashboard TestDashboard.testEdit
 ./check-dashboard TestDashboard.testSetup
 ./check-menu
@@ -63,6 +67,7 @@ $RUNNER <<EOF
 ./check-reauthorize
 ./check-docker
 ./check-loopback
+./check-kubernetes
 EOF
 
 echo VERIFICATION PASSED

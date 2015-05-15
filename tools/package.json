@@ -6,8 +6,11 @@
     "po2json": "*",
     "jed": "*",
     "jshint": "*",
+    "requirejs": "*",
     "uglify-js": "*",
-    "html-minifier": "*"
+    "uglifycss": "*",
+    "html-minifier": "*",
+    "esprima": "*",
+    "bower": "*"
   }
 }
-

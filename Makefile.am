@@ -1,7 +1,7 @@
 NULL =
 man_MANS =
 BUILT_SOURCES =
-EXTRA_DIST = README.md
+EXTRA_DIST = README.md branding
 CLEANFILES = *.js *.min.js *.ok */*.ok */*/*.ok *.html *.css
 bin_PROGRAMS =
 check_SCRIPTS =
@@ -18,21 +18,45 @@ TESTS =
 dist_systemdunit_DATA   =
 nodist_systemdunit_DATA =
 
-SUFFIXES = .js .min.js .css .html .min.html .1 .8 .5
+SUFFIXES = .css .min.css .min.css.gz .js .js.gz .min.js .min.js.gz .html .min.html .min.html.gz .woff .woff.gz .1 .8 .5
 
 V_CHECK = $(V_CHECK_$(V))
 V_CHECK_ = $(V_CHECK_$(AM_DEFAULT_VERBOSITY))
 V_CHECK_0 = @echo "  CHECK   " $@;
 
+V_GZIP = $(V_GZIP_$(V))
+V_GZIP_ = $(V_GZIP_$(AM_DEFAULT_VERBOSITY))
+V_GZIP_0 = @echo "  GZIP    " $@;
+
+MV = mv -f
+
+.css.min.css:
+	@$(MKDIR_P) $(dir $@)
+	$(AM_V_GEN) $(srcdir)/tools/missing $(srcdir)/tools/r.js -o cssIn=$< optimizeCss=standard logLevel=3 out=$@
 .js.min.js:
 	@$(MKDIR_P) $(dir $@)
 	$(V_CHECK) $(srcdir)/tools/missing $(srcdir)/tools/jshint $<
-	$(AM_V_GEN) $(srcdir)/tools/missing $(srcdir)/tools/uglifyjs $< --mangle > $@.tmp && mv $@.tmp $@
-
+	$(AM_V_GEN) $(srcdir)/tools/missing $(srcdir)/tools/uglifyjs $< --mangle > $@.tmp && $(MV) $@.tmp $@
 .html.min.html:
 	@$(MKDIR_P) $(dir $@)
 	$(V_CHECK) $(srcdir)/tools/missing $(srcdir)/tools/jshint --extract=always $<
 	$(AM_V_GEN) $(srcdir)/tools/missing $(srcdir)/tools/html-minifier --output $@ $<
+
+.min.css.min.css.gz:
+	@$(MKDIR_P) $(dir $@)
+	$(V_GZIP) gzip -c $< > $@.tmp && $(MV) $@.tmp $@
+.min.html.min.html.gz:
+	@$(MKDIR_P) $(dir $@)
+	$(V_GZIP) gzip -c $< > $@.tmp && $(MV) $@.tmp $@
+.js.js.gz:
+	@$(MKDIR_P) $(dir $@)
+	$(V_GZIP) gzip -c $< > $@.tmp && $(MV) $@.tmp $@
+.min.js.min.js.gz:
+	@$(MKDIR_P) $(dir $@)
+	$(V_GZIP) gzip -c $< > $@.tmp && $(MV) $@.tmp $@
+.woff.woff.gz:
+	@$(MKDIR_P) $(dir $@)
+	$(V_GZIP) gzip -c $< > $@.tmp && $(MV) $@.tmp $@
 
 po/po.%.js: po/%.po
 	@$(MKDIR_P) $(dir $@)
@@ -86,6 +110,7 @@ VALGRIND_SUPPRESSIONS = \
 	tools/travis.supp \
 	tools/pcp.supp \
 	tools/unknown.supp \
+	tools/zlib.supp \
 	$(NULL)
 
 valgrind-suppressions: $(VALGRIND_SUPPRESSIONS)
@@ -117,7 +142,6 @@ SED_SUBST = sed \
         $(NULL)
 
 GDBUS_CODEGEN = $(top_srcdir)/tools/gdbus-unbreak-codegen
-VERIFY_CHECKSUMS = $(top_srcdir)/tools/verify-checksums
 
 testassetsdir = $(datadir)/cockpit-test-assets
 testassets_programs =
@@ -133,11 +157,11 @@ install-test-assets: $(testassets_programs) $(testassets_data) $(testassets_syst
 	cd $(srcdir); for d in $(testassets_data); do $(INSTALL_DATA) -D $$d $(DESTDIR)$(testassetsdir)/$$d; done
 	for d in $(testassets_systemdunit_data); do $(INSTALL_DATA) $$d $(DESTDIR)$(systemdunitdir); done
 	ln -sn $(libexecdir)/cockpit-bridge $(DESTDIR)$(testassetsdir)/cockpit-bridge
-	ln -sn base $(DESTDIR)$(testassetsdir)/pkg/base1
 
 clean-local:
 	find $(builddir) -name '*.gc??' -delete
 	find $(srcdir) -name '*.pyc' -delete
+	find $(builddir) -name '*.gz' -delete
 	rm -rf mock-archives
 
 uninstall-local:: uninstall-doc-local
@@ -148,6 +172,8 @@ install-data-hook::
 	-chgrp wheel $(DESTDIR)$(localstatedir)/lib/cockpit
 	-chmod 775 $(DESTDIR)$(localstatedir)/lib/cockpit
 
+LATEST = latest/
+
 if ENABLE_DOC
 
 include doc/Makefile-doc.am
@@ -156,7 +182,7 @@ include doc/man/Makefile-man.am
 
 nodist_noinst_DATA += guide/index.html
 
-install-data-local: guide/index.html
+install-doc-local: guide/index.html
 	$(MKDIR_P) $(DESTDIR)$(htmldir)
 	$(INSTALL_DATA) `dirname $<`/* $(DESTDIR)$(htmldir)
 
@@ -171,6 +197,8 @@ dist-doc-hook:
 
 else
 
+install-doc-local:
+	@true
 uninstall-doc-local:
 	@true
 dist-doc-hook:
@@ -180,28 +208,42 @@ upload-doc:
 
 endif
 
+install-data-local:: install-doc-local
+	@true
+
 dist-hook: dist-doc-hook
 	ln -s systemd $(distdir)/pkg/system
-	ln -s base $(distdir)/pkg/base1
 
 distcheck-hook: dist-doc-hook
 	@true
 
+upload-pot:
+	zanata-cli push --project-config "$(srcdir)/tools/zanata.xml" -s "$(builddir)/po" -t "$(srcdir)/po"
 
-include lib/Makefile.am
-include pkg/base/Makefile.am
+download-po:
+	zanata-cli pull --project-config "$(srcdir)/tools/zanata.xml" -s "$(builddir)/po" -t "$(srcdir)/po"
+
+BOWER = $(srcdir)/tools/bower_components
+
+update-bower:
+	( cd $(srcdir)/tools && ./bower update )
+
+include pkg/base1/Makefile.am
+include pkg/dashboard/Makefile.am
 include pkg/docker/Makefile.am
 include pkg/kubernetes/Makefile.am
-include pkg/legacy/Makefile.am
 include pkg/playground/Makefile.am
+include pkg/realmd/Makefile.am
 include pkg/shell/Makefile.am
+include pkg/subscriptions/Makefile.am
 include pkg/systemd/Makefile.am
 include src/bridge/Makefile.am
 include src/common/Makefile-common.am
+include src/legacy/Makefile.am
+include src/legacy/lvm/Makefile.am
 include src/websocket/Makefile-websocket.am
 include tools/Makefile-tools.am
 include src/ws/Makefile-ws.am
-include src/daemon/Makefile-daemon.am
 include src/static/Makefile-static.am
 include src/remotectl/Makefile-remotectl.am
 include src/reauthorize/Makefile-reauthorize.am

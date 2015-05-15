@@ -76,6 +76,7 @@
       <para>Also included in this file are the jQuery plugins used. For this package these
         these are: <ulink url="http://getbootstrap.com">Bootstrap 3.0.3</ulink>,
         <ulink url="http://silviomoreto.github.io/bootstrap-select/">bootstrap-select 1.6.3</ulink>,
+        <ulink url="http://github.com/eternicode/bootstrap-datepicker/">bootstrap-datepicker 1.4.0</ulink>,
         and <ulink url="http://www.flotcharts.org/">Flot 0.7</ulink>.</para>
 
     </refsection>
@@ -134,6 +135,31 @@
         on the widgets and classes available.</para>
 
     </refsection>
+  </refentry>
+
+  <refentry id="api-base1-require">
+    <refmeta>
+      <refentrytitle>require.js</refentrytitle>
+    </refmeta>
+
+    <refnamediv>
+      <refname>require.js</refname>
+      <refpurpose>Require JS javascript loader</refpurpose>
+    </refnamediv>
+
+    <refsection>
+      <title>Description</title>
+
+<programlisting>
+  &lt;script src="../base1/require.js"&gt;&lt;/script&gt;
+</programlisting>
+
+      <para>This is the Require JS javascript loader. It supports Asynchronous Module Definition
+        and allows javascript modules to declare dependencies to load.</para>
+
+      <para>The current Require JS version is 2.1.x.</para>
+    </refsection>
+
   </refentry>
 
   <!-- term.js is not public API -->

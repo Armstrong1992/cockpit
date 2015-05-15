@@ -17,13 +17,16 @@
  * along with Cockpit; If not, see <http://www.gnu.org/licenses/>.
  */
 
-/* global jQuery   */
-/* global cockpit  */
-/* global _        */
-/* global C_       */
+define([
+    "jquery",
+    "base1/cockpit",
+    "shell/shell",
+    "shell/cockpit-main"
+], function($, cockpit, shell) {
+"use strict";
 
-var shell = shell || { };
-(function($, cockpit, shell) {
+var _ = cockpit.gettext;
+var C_ = cockpit.gettext;
 
 PageSetupServer.prototype = {
     _init: function() {
@@ -35,9 +38,11 @@ PageSetupServer.prototype = {
     },
 
     leave: function() {
-        $(this.local_client).off('.setup');
-        this.local_client.release();
-        this.local_client = null;
+        var self = this;
+        $(self.local).off();
+        self.local.close();
+        self.local = null;
+        self.cancel();
     },
 
     setup: function() {
@@ -82,6 +87,7 @@ PageSetupServer.prototype = {
         }
 
         $('#dashboard_setup_next').text(_("Next"));
+        $("#dashboard_setup_spinner").hide();
     },
 
     check_empty_name: function() {
@@ -106,12 +112,15 @@ PageSetupServer.prototype = {
         }
 
         $('#dashboard_setup_next').text(_("Next"));
+        $("#dashboard_setup_spinner").hide();
     },
 
     enter: function() {
         var self = this;
 
-        self.client = null;
+        self.local = cockpit.dbus(null, { bus: "internal", host: "localhost", superuser: true });
+
+        self.machines = PageSetupServer.machines;
         self.address = null;
         self.options = { "host-key": "" };
         self.name_is_done = false;
@@ -145,17 +154,6 @@ PageSetupServer.prototype = {
             }
         });
 
-        /* TODO: This code needs to be migrated away from old dbus */
-        self.local_client = shell.dbus("localhost");
-        $(self.local_client).on('objectAdded.setup objectRemoved.setup', function(event, object) {
-            if (object.lookup('com.redhat.Cockpit.Machine'))
-                self.update_discovered();
-        });
-        $(self.local_client).on('propertiesChanged.setup', function(event, object, iface) {
-            if (iface._iface_name == "com.redhat.Cockpit.Machine")
-                self.update_discovered();
-        });
-
         $('#dashboard_setup_address').val("");
         $('#dashboard_setup_login_user').val("");
         $('#dashboard_setup_login_password').val("");
@@ -165,15 +163,18 @@ PageSetupServer.prototype = {
         self.show_tab('address');
         self.update_discovered();
         $('#dashboard_setup_next').prop('disabled', true);
+        $("#dashboard_setup_spinner").hide();
     },
 
     update_discovered: function() {
+        var self = this;
+
         var filter = $('#dashboard_setup_address').val();
         var discovered = $('#dashboard_setup_address_discovered');
-        var machines = this.local_client.getInterfacesFrom("/com/redhat/Cockpit/Machines",
-                                                           "com.redhat.Cockpit.Machine");
 
         function render_address(address) {
+            if (!address.trim())
+                return null;
             if (!filter)
                 return $('<span/>').text(address);
             var index = address.indexOf(filter);
@@ -186,25 +187,30 @@ PageSetupServer.prototype = {
         }
 
         discovered.empty();
-        for (var i = 0; i < machines.length; i++) {
-            if (!shell.find_in_array(machines[i].Tags, "dashboard")) {
-                var rendered_address = render_address(machines[i].Address);
+
+        var rendered_address, item;
+        var address, machine, addresses = self.machines.addresses;
+        for (var i = 0; i < addresses.length; i++) {
+            address = addresses[i];
+            machine = self.machines.lookup(address);
+            if (!machine.visible) {
+                rendered_address = render_address(address);
                 if (rendered_address) {
-                    if (machines[i].Address.trim() !== "") {
-                        var item =
-                            $('<li>', { 'class': 'list-group-item',
-                                        'on': { 'click': $.proxy(this, 'discovered_clicked', machines[i])
+                    item =
+                        $('<li>', {
+                            'class': 'list-group-item',
+                            'on': {
+                                'click': $.proxy(this, 'discovered_clicked', address)
                                               }
-                                      }).html(rendered_address);
-                        discovered.append(item);
-                    }
+                        }).html(rendered_address);
+                    discovered.append(item);
                 }
             }
         }
     },
 
-    discovered_clicked: function(iface) {
-        $("#dashboard_setup_address").val(iface.Address);
+    discovered_clicked: function(address) {
+        $("#dashboard_setup_address").val(address);
         this.update_discovered();
         $("#dashboard_setup_address").focus();
     },
@@ -212,6 +218,7 @@ PageSetupServer.prototype = {
     show_tab: function(tab) {
         $('.cockpit-setup-tab').hide();
         $('#dashboard_setup_next').text(_("Next"));
+        $("#dashboard_setup_spinner").hide();
         if (tab == 'address') {
             $('#dashboard_setup_address_tab').show();
             $("#dashboard_setup_address").focus();
@@ -248,8 +255,9 @@ PageSetupServer.prototype = {
     },
 
     close: function() {
-        if (this.client)
-            this.client.close("cancelled");
+        var self = this;
+        if (self.remote)
+            self.remote.close();
         $("#dashboard_setup_server_dialog").modal('hide');
     },
 
@@ -263,7 +271,7 @@ PageSetupServer.prototype = {
     },
 
     next: function() {
-        $('#dashboard_setup_next').html('<div class="waiting"/>');
+        $("#dashboard_setup_spinner").show();
         $('#dashboard_setup_next').prop('disabled', true);
         this.next_action();
     },
@@ -276,47 +284,51 @@ PageSetupServer.prototype = {
 
         var self = this;
 
-        /* TODO: This needs to be migrated away from the old dbus */
-        var client = shell.dbus(self.address, self.options);
-        $(client).on('state-change', function() {
-            if (client.state == "closed") {
-                if (!self.options.host_key && client.error == "unknown-hostkey") {
+        var options = $.extend({ bus: "internal", host: self.address, superuser: true }, self.options);
+        var client = cockpit.dbus(null, options);
+
+        $(client)
+            .on("close", function(event, options) {
+                if (!self.options["host-key"] && options.problem == "unknown-hostkey") {
                     /* The host key is unknown.  Remember it and try
                      * again while allowing that one host key.  When
                      * the user confirms the host key eventually, we
                      * store it permanently.
                      */
-                    self.options["host-key"] = client.error_details["host-key"];
-                    $('#dashboard_setup_action_fingerprint').text(client.error_details["host-fingerprint"]);
+                    self.options["host-key"] = options["host-key"];
+                    $('#dashboard_setup_action_fingerprint').text(options["host-fingerprint"]);
                     self.connect_server();
                     return;
-                } else if (client.error == "not-authorized") {
+                } else if (options.problem == "authentication-failed") {
                     /* The given credentials didn't work.  Ask the
                      * user to try again.
                      */
                     self.show_tab('login');
                     self.highlight_error_message('#dashboard_setup_login_error',
-                                                 cockpit.message(client.error));
+                                                 cockpit.message(options.problem));
                     return;
                 }
 
                 /* The connection has failed.  Show the error on every
                  * tab but stay on the current tab.
                  */
-                var problem = client.error || "disconnected";
+                var problem = options.problem || "disconnected";
                 self.highlight_error_message('#dashboard_setup_address_error', cockpit.message(problem));
                 self.highlight_error_message('#dashboard_setup_login_error', cockpit.message(problem));
 
                 $('#dashboard_setup_next').prop('disabled', false);
                 $('#dashboard_setup_next').text(_("Next"));
+                $("#dashboard_setup_spinner").hide();
+            });
 
-                return;
-
-            } else if (client.state == "ready") {
-                /* We are in.  Start the setup.
-                 */
-                self.client = client;
-                self.prepare_setup();
+        var remote = client.proxy("cockpit.Setup", "/setup");
+        var local = self.local.proxy("cockpit.Setup", "/setup");
+        remote.wait(function() {
+            if (remote.valid) {
+                self.remote = client;
+                local.wait(function() {
+                    self.prepare_setup(remote, local);
+                });
             }
         });
     },
@@ -339,11 +351,12 @@ PageSetupServer.prototype = {
             else {
                 me.options.user = null;
                 me.options.password = null;
-                me.options.host_key = null;
+                me.options["host-key"] = null;
                 me.connect_server();
             }
         } else {
             $('#dashboard_setup_next').text(_("Next"));
+            $("#dashboard_setup_spinner").hide();
             me.highlight_error_message('#dashboard_setup_address_error',
                                        _("IP address or host name cannot be empty."));
         }
@@ -364,6 +377,7 @@ PageSetupServer.prototype = {
             me.connect_server();
         } else {
             $('#dashboard_setup_next').text(_("Next"));
+            $("#dashboard_setup_spinner").hide();
             me.highlight_error_message('#dashboard_setup_login_error',
                                        _("User name cannot be empty."));
         }
@@ -386,15 +400,13 @@ PageSetupServer.prototype = {
                     $('<td/>').text(
                         desc),
                     $('<td style="width:16px"/>').append(
-                        $('<div>',  { 'class': "cockpit-setup-task-spinner waiting",
+                        $('<div>',  { 'class': "cockpit-setup-task-spinner spinner",
                                       'style': "display:none"
                                     }),
-                        $('<img/>', { 'class': "cockpit-setup-task-error",
-                                      'src': "images/dialog-error.png",
+                        $('<div>', { 'class': "cockpit-setup-task-error fa fa-exclamation-triangle",
                                       'style': "display:none"
                                     }),
-                        $('<img/>', { 'class': "cockpit-setup-task-done",
-                                      'src': "images/face-smile.png",
+                        $('<div>', { 'class': "cockpit-setup-task-done pficon pficon-ok",
                                       'style': "display:none"
                                     })))));
 
@@ -436,173 +448,64 @@ PageSetupServer.prototype = {
         run(0);
     },
 
-    prepare_setup: function() {
-        var me = this;
+    prepare_setup: function(remote, local) {
+        var self = this;
 
-        function get_role_accounts(client, roles) {
-            var i;
-            var accounts = client.getInterfacesFrom("/com/redhat/Cockpit/Accounts/",
-                                                    "com.redhat.Cockpit.Account");
-            var map = { };
+        /* We assume all cockpits support the 'passwd1' mechanism */
+        remote.Prepare("passwd1")
+            .done(function(prepared) {
+                self.reset_tasks();
+                self.add_task(_("Synchronize admin logins"), function(task, done) {
+                    passwd1_mechanism(task, done, prepared);
+                });
+                $('#dashboard_setup_action_address').text(self.address);
+                self.show_tab('action');
+            })
+            .fail(function(ex) {
+                self.highlight_error_message('#dashboard_setup_address_error', ex);
+                self.highlight_error_message('#dashboard_setup_login_error', ex);
+            });
 
-            function groups_contain_roles(groups) {
-                for (var i = 0; i < roles.length; i++) {
-                    if (shell.find_in_array(groups, roles[i][0]))
-                        return true;
-                }
-                return false;
-            }
-
-            for (i = 0; i < accounts.length; i++) {
-                if (roles === null || groups_contain_roles(accounts[i].Groups))
-                    map[accounts[i].UserName] = accounts[i];
-            }
-            return map;
-        }
-
-        var manager = this.local_client.lookup("/com/redhat/Cockpit/Accounts",
-                                               "com.redhat.Cockpit.Accounts");
-        var local = get_role_accounts(this.local_client, manager.Roles);
-        var remote = get_role_accounts(this.client, null);
-
-        function needs_update(l) {
-            // XXX
-            return true;
-        }
-
-        function update_account(templ, task, done) {
-
-            var acc;
-
-            function std_cont(func) {
-                return function(error, result) {
-                    if (error) {
-                        task.error(error.message);
-                        done();
-                    } else {
-                        func(result);
-                    }
-                };
-            }
-
-            function create() {
-                var accounts = me.client.getInterfacesFrom("/com/redhat/Cockpit/Accounts",
-                                                           "com.redhat.Cockpit.Account");
-
-                for (var i = 0; i < accounts.length; i++) {
-                    if (accounts[i].UserName == templ.UserName) {
-                        acc = accounts[i];
-                        set_groups();
-                        return;
-                    }
-                }
-
-                var manager = me.client.lookup("/com/redhat/Cockpit/Accounts",
-                                               "com.redhat.Cockpit.Accounts");
-                manager.call("CreateAccount",
-                             templ.UserName,
-                             templ.RealName,
-                             "",
-                             false,
-                             std_cont(set_groups_path));
-            }
-
-            function set_groups_path(path) {
-                acc = me.client.lookup(path, "com.redhat.Cockpit.Account");
-                if (!acc) {
-                    task.error("Account object not found");
+        function passwd1_mechanism(task, done, prepared) {
+            local.Transfer("passwd1", prepared)
+                .fail(function(ex) {
+                    task.error(ex);
                     done();
-                } else
-                    set_groups();
-            }
-
-            function set_groups() {
-                // XXX - filter out non-role groups and groups that
-                //       don't exist on the target
-                acc.call('ChangeGroups', templ.Groups, [ ],
-                         std_cont(get_avatar));
-            }
-
-            function get_avatar() {
-                templ.call('GetIconDataURL',
-                           std_cont(set_avatar));
-            }
-
-            function set_avatar(dataurl) {
-                if (dataurl) {
-                    acc.call('SetIconDataURL', dataurl,
-                             std_cont(get_password_hash));
-                } else
-                    get_password_hash();
-            }
-
-            function get_password_hash() {
-                templ.call('GetPasswordHash',
-                           std_cont(set_password_hash));
-            }
-
-            function set_password_hash(hash) {
-                acc.call('SetPasswordHash', hash,
-                         std_cont(done));
-            }
-
-            create();
+                })
+                .done(function(result) {
+                    remote.Commit("passwd1", result)
+                        .fail(function(ex) {
+                            task.error(ex);
+                        })
+                        .always(function() {
+                            done();
+                        });
+                });
         }
-
-        this.reset_tasks();
-
-        function create_update_task(templ) {
-            return function(task, done) {
-                update_account(templ, task, done);
-            };
-        }
-
-        for (var l in local) {
-            if (needs_update(l))
-                this.add_task("Synchronize administrator " + local[l].UserName,
-                              create_update_task(local[l]));
-        }
-
-        $('#dashboard_setup_action_address').text(this.address);
-
-        this.show_tab('action');
     },
 
     next_setup: function() {
-        var me = this;
+        var self = this;
 
         /* We can only add the machine to the list of known machines
          * here since doing so also stores its key as 'known good',
          * and we need the users permission for this.
-         *
-         * TODO: Add a method to set only the key and use it here.
          */
 
-        var machines = this.local_client.lookup("/com/redhat/Cockpit/Machines",
-                                                "com.redhat.Cockpit.Machines");
-        machines.call('Add', me.address, me.options["host-key"], function(error, path) {
-            if (error) {
-                me.highlight_error_message('#dashboard_setup_address_error', error.message);
-                me.show_tab('address');
-                return;
-            }
-
-            me.machine = me.local_client.lookup(path, "com.redhat.Cockpit.Machine");
-            if (!me.machine) {
-                me.highlight_error_message('#dashboard_setup_address_error',
-                                           _("New machine not found in list after adding."));
-                me.show_tab('address');
-                return;
-            }
-
-            me.run_tasks(function() {
-                me.machine.call('AddTag', "dashboard", function(error) {
-                    if (error)
-                        shell.show_unexpected_error(error);
-                    me.show_tab('close');
+        self.machines.add(self.address, self.options["host-key"])
+            .fail(function(ex) {
+                self.highlight_error_message('#dashboard_setup_address_error', ex.toString());
+                self.show_tab('address');
+            })
+            .done(function(machine) {
+                self.run_tasks(function() {
+                    machine.change({ visible: true })
+                        .fail(function(ex) {
+                            shell.show_unexpected_error(ex);
+                        });
+                    self.show_tab('close');
                 });
             });
-        });
     },
 
     next_close: function() {
@@ -617,4 +520,9 @@ function PageSetupServer() {
 
 shell.dialogs.push(new PageSetupServer());
 
-})(jQuery, cockpit, shell);
+shell.host_setup = function host_setup(machines) {
+    PageSetupServer.machines = machines;
+    $('#dashboard_setup_server_dialog').modal('show');
+};
+
+});

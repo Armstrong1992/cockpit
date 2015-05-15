@@ -21,12 +21,9 @@ along with Cockpit; If not, see <http://www.gnu.org/licenses/>.
 <head>
     <meta charset="utf-8">
     <title>Kubernetes tests</title>
-    <link rel="stylesheet" href="../../lib/qunit-1.14.0.css" type="text/css" media="screen" />
-    <script type="text/javascript" src="../../lib/jquery.v2.1.0.js"></script>
-    <script type="text/javascript" src="../../lib/qunit-1.14.0.js"></script>
-    <script type="text/javascript" src="../../lib/qunit-tap.js"></script>
-    <script type="text/javascript" src="../../tools/qunit-config.js"></script>
-    <script type="text/javascript" src="../base1/cockpit.js"></script>
+    <link rel="stylesheet" href="../../tools/qunit.css" type="text/css" media="screen" />
+    <script type="text/javascript" src="../../tools/qunit.js"></script>
+    <script type="text/javascript" src="../base1/require.js"></script>
 </head>
 <body>
     <h1 id="qunit-header">Kubernetes tests</h1>
@@ -107,7 +104,7 @@ function MockHttp(callback) {
             if (responsers)
                 responsers.fire(status, headers || []);
             if (status < 200 || status > 299)
-                dfd.reject(new HttpError(status, reason, body));
+                dfd.reject(new HttpError(status, reason, body), body);
             else if (body !== undefined)
                 req.mock_data(body, false);
         };
@@ -257,182 +254,15 @@ var kube_last = 100;
 
 var kude_data = { };
 
-var kube_fixtures = {
-    "nodes/127.0.0.1": {
-        "kind": "Node",
-        "metadata": {
-            "id": "127.0.0.1",
-            "uid": "f530580d-a169-11e4-8651-10c37bdb8410",
-            "creationTimestamp": "2015-01-21T13:35:18+01:00",
-            "resourceVersion": 1,
-        },
-        "spec": {
-            "capacity": {
-                "cpu": "1k",
-                "memory": "3Gi",
-            }
-        },
-        "status": {
-            "hostIP": "127.0.0.1",
-            "conditions": [
-                {
-                    "kind": "Ready",
-                    "status": "Full",
-                    "lastTransitionTime": null
-                }
-            ]
-        }
-    },
-    "namespaces/default/pods/database-1": {
-        "kind": "Pod",
-        "metadata": {
-            "name": "wordpress",
-            "resourceVersion": 5,
-            "uid": "0b547d64-ab8a-11e4-9a7c-080027300d85",
-            "namespace": "default",
-            "labels": {
-                "name": "wordpressreplica"
-            },
-        },
-        "spec": {
-            "volumes": null,
-            "containers": [
-                {
-                    "name": "slave",
-                    "image": "jbfink/wordpress",
-                    "ports": [
-                        {
-                            "hostPort": 81,
-                            "containerPort": 80,
-                            "protocol": "TCP"
-                        }
-                    ],
-                    "imagePullPolicy": "IfNotPresent"
-                }
-            ],
-            "restartPolicy": {
-                "always": {}
-            },
-            "dnsPolicy": "ClusterFirst"
-        },
-        "status": {
-            "phase": "Running",
-            "Condition": [
-                {
-                    "kind": "Ready",
-                    "status": "Full"
-                }
-            ],
-            "host": "127.0.0.1",
-            "hostIP": "127.0.0.1",
-            "podIP": "172.17.4.173",
-            "info": {
-                "POD": {
-                    "state": {
-                        "running": {
-                            "startedAt": "2015-02-13T16:21:35Z"
-                        }
-                    },
-                    "ready": false,
-                    "restartCount": 0,
-                    "containerID": "docker://9031b6aef7829ec029955377bd53642760899d4eed37738830756d0ce092a01d",
-                    "podIP": "172.17.4.173",
-                    "image": "kubernetes/pause:latest",
-                    "imageID": "docker://6c4579af347b649857e915521132f15a06186d73faa62145e3eeeb6be0e97c27"
-                },
-                "slave": {
-                    "state": {
-                        "running": {
-                            "startedAt": "2015-02-13T16:27:49Z"
-                        }
-                    },
-                    "ready": true,
-                    "restartCount": 0,
-                    "containerID": "docker://dc70bd24ecc7fd86a385d67bdbc2a60b219cf34fdd215f8f599c95ba93b1a82b",
-                    "image": "jbfink/wordpress",
-                    "imageID": "docker://0beee7f478c860c8444aa6a3966e1cb0cd574a01c874fc5dcc48585bd45dba52"
-                }
-            }
-        }
-    },
-    "namespaces/default/pods/apache": {
-        "kind": "Pod",
-        "metadata": {
-            "name": "apache",
-            "uid": "11768037-ab8a-11e4-9a7c-080027300d85",
-            "resourceVersion": 5,
-            "namespace": "default",
-            "labels": {
-                "name": "apache"
-            },
-        },
-        "spec": {
-            "volumes": null,
-            "containers": [
-                {
-                    "name": "slave",
-                    "image": "fedora/apache",
-                    "ports": [
-                        {
-                            "hostPort": 8084,
-                            "containerPort": 80,
-                            "protocol": "TCP"
-                        }
-                    ],
-                    "imagePullPolicy": "IfNotPresent"
-                }
-            ],
-            "restartPolicy": {
-                "always": {}
-            },
-            "dnsPolicy": "ClusterFirst"
-        },
-    },
-    "namespaces/default/services/kubernetes": {
-        "kind": "Service",
-        "metadata": {
-            "name": "kubernetes",
-            "namespace": "default",
-            "uid": "9750385b-7fa4-11e4-91e3-10c37bdb8410",
-            "resourceVersion": "15",
-        },
-        "spec": {
-            "port": 443,
-            "protocol": "TCP",
-            "selector": {
-                "component": "apiserver",
-                "provider": "kubernetes"
-            },
-            "portalIP": "10.254.224.238",
-            "containerPort": 0,
-            "sessionAffinity": "None"
-        },
-        "status": {}
-    },
-    "namespaces/default/services/kubernetes-ro": {
-        "kind": "Service",
-        "apiVersion": "v1beta3",
-        "metadata": {
-            "name": "kubernetes-ro",
-            "namespace": "default",
-            "selfLink": "/api/v1beta3/namespaces/default/services/kubernetes-ro",
-            "uid": "97504104-7fa4-11e4-91e3-10c37bdb8410",
-            "resourceVersion": "16",
-        },
-        "spec": {
-            "port": 80,
-            "protocol": "TCP",
-            "selector": {
-                "component": "apiserver",
-                "provider": "kubernetes"
-            },
-            "portalIP": "10.254.117.100",
-            "containerPort": 0,
-            "sessionAffinity": "None"
-        },
-        "status": {}
+function guid() {
+    function s4() {
+        return Math.floor((1 + Math.random()) * 0x10000)
+            .toString(16)
+            .substring(1);
     }
-};
+    return s4() + s4() + '-' + s4() + '-' + s4() + '-' +
+           s4() + '-' + s4() + s4() + s4();
+}
 
 function kube_update(key, item) {
     var type;
@@ -442,7 +272,7 @@ function kube_update(key, item) {
             item = kube_data[key];
             delete kube_data[key];
         } else {
-            return;
+            return null;
         }
     } else {
         if (kube_data[key])
@@ -454,10 +284,13 @@ function kube_update(key, item) {
 
     if (!item.metadata)
         item.metadata = { };
+    if (!item.metadata.uid)
+        item.metadata.uid = guid();
     item.metadata.resourceVersion = kube_last;
     kube_last += 1;
 
     $(kube_data).triggerHandler("notify", [ type, key, item ]);
+    return item;
 }
 
 function kube_apiserver(req) {
@@ -477,14 +310,20 @@ function kube_apiserver(req) {
     if (parts[0] != "api" && parts[1] != "v1beta3")
         return false;
 
-    if (req.method !== "GET") {
-        req.mock_respond(405, "Unsupported method");
-        return;
-    }
-
-    var resourceVersion = null;
-
     parts = parts.slice(2);
+
+    if (req.method === "POST") {
+        return kube_api_post(req, parts, query);
+    } else if (req.method === "GET") {
+        return kube_api_get(req, parts, query);
+    } else {
+        req.mock_respond(405, "Unsupported method");
+        return true;
+    }
+}
+
+function kube_api_get(req, parts, query) {
+    var resourceVersion = null;
 
     /* Figure out if this is a watch */
     var watch = false;
@@ -505,7 +344,6 @@ function kube_apiserver(req) {
 
     function prepare(key, item) {
         if (resourceVersion) {
-            console.log("resourceVersion", resourceVersion);
             if (!item.metadata || !item.metadata.resourceVersion ||
                 item.metadata.resourceVersion < resourceVersion)
                 return null;
@@ -541,6 +379,9 @@ function kube_apiserver(req) {
     } else if (what == "replicationcontrollers") {
         regexp = /namespaces\/.+\/replicationcontrollers\//;
         kind = "ReplicationControllerList";
+    } else if (what == "events") {
+        regexp = /namespaces\/.+\/events\//;
+        kind = "EventList";
 
     /* Nothing found */
     } else {
@@ -593,6 +434,57 @@ function kube_apiserver(req) {
         respond_get();
 }
 
+function kube_api_post(req, parts, query) {
+    var namespace;
+    var section;
+
+    if (parts.length === 3) {
+        if (parts[0] != "namespaces")
+            return false;
+        namespace = parts[1];
+        section = parts[2];
+    } else if (parts.length === 1) {
+        section = parts[0];
+    } else {
+        return false;
+    }
+
+    var item;
+    try {
+        item = JSON.parse(req.body);
+    } catch(ex) {
+        req.mock_respond(400, "Bad JSON");
+        return;
+    }
+
+    var kind = item.kind;
+    var meta = item.metadata || { };
+    var name = meta.name;
+
+    if (!kind || !meta || !name) {
+        req.mock_respond(400, "Bad fields in JSON");
+        return;
+    }
+
+    if (kind.toLowerCase() + "s" != section) {
+        req.mock_respond(400, "Bad section of URI");
+        return;
+    }
+
+    parts.push(name);
+    var key = parts.join("/");
+
+    if (kube_data[key]) {
+        req.mock_respond(409, "Already exists", { "Content-Type": "application/json" },
+                         JSON.stringify({ code: 409, message: "Already exists" }));
+        return;
+    }
+
+    kube_update(key, item);
+    req.mock_respond(200, "OK", { "Content-Type": "application/json" }, JSON.stringify(item));
+    return true;
+}
+
 function etcd_server(req) {
     if (req.path.indexOf("wait=true") !== -1) {
         /*
@@ -602,7 +494,6 @@ function etcd_server(req) {
         return;
     }
 
-    console.log(req.path, req);
     return false;
 }
 
@@ -613,10 +504,10 @@ function etcd_server(req) {
 require([
     "jquery",
     "base1/cockpit",
-    "kubernetes/kubernetes"
-], function($, cockpit, kubernetes) {
-
-
+    "kubernetes/client",
+    "kubernetes/mock-basic",
+    "kubernetes/mock-large"
+], function($, cockpit, kubernetes, mock_basic, mock_large) {
     var cockpit_http = cockpit.http;
     cockpit.http = function(endpoint) {
         /* Our mock kubernetes apiserver */
@@ -633,8 +524,30 @@ require([
     };
 
     /* A fresh set of kube_data for each test */
-    QUnit.testStart(function() {
-        kube_data = $.extend(true, { }, kube_fixtures);
+    QUnit.module("basic", {
+        setup: function() {
+            kube_data = $.extend(true, { }, mock_basic);
+        }
+    });
+
+    test("singleton", function() {
+        var client = kubernetes.k8client();
+        var client2 = kubernetes.k8client();
+
+        strictEqual(client, client2, "singleton returned same object");
+
+        client2.close();
+
+        var client3 = kubernetes.k8client();
+        strictEqual(client, client3, "singleton returned same object after one closed");
+
+        client.close();
+        client3.close();
+
+        var client4 = kubernetes.k8client();
+
+        notStrictEqual(client, client4, "different object after all closed");
+        client4.close();
     });
 
     asyncTest("list nodes", function() {
@@ -644,7 +557,7 @@ require([
         $(client).on("nodes", function(ev) {
             var node = client.nodes[0];
             equal(client.nodes.length, 1, "number of nodes");
-            equal(node.metadata.id, "127.0.0.1", "localhost node");
+            equal(node.metadata.name, "127.0.0.1", "localhost node");
             equal(typeof node.spec.capacity, "object", "node has resources");
 
             $(client).off("nodes");
@@ -800,6 +713,278 @@ require([
 
         /* No error should be thrown on immediate close*/
         client.close();
+    });
+
+    var create_items = [
+        {
+            "kind": "Pod",
+            "apiVersion": "v1beta3",
+            "metadata": {
+                "name": "pod1",
+                "uid": "d072fb85-f70e-11e4-b829-10c37bdb8410",
+                "resourceVersion": "634203",
+                "labels": {
+                    "name": "pod1"
+                    },
+            },
+            "spec": {
+                "volumes": null,
+                "containers": [{
+                    "name": "database",
+                    "image": "mysql",
+                    "ports": [{ "containerPort": 3306, "protocol": "TCP" }],
+                }],
+                "host": "127.0.0.1"
+            }
+        },{
+            "kind": "Node",
+            "apiVersion": "v1beta3",
+            "metadata": {
+                "name": "node1",
+                "uid": "6e51438e-d161-11e4-acbc-10c37bdb8410",
+                "resourceVersion": "634539",
+            },
+            "spec": {
+                "externalID": "172.2.3.1"
+            }
+        }
+    ];
+
+    asyncTest("create", function() {
+        expect(6);
+
+        var client = kubernetes.k8client();
+
+        client.create(create_items, "namespace1")
+            .done(function() {
+                equal(kube_data["namespaces/namespace1/pods/pod1"].metadata.name, "pod1", "pod created");
+                equal(kube_data["nodes/node1"].metadata.name, "node1", "node created");
+                equal(kube_data["namespaces/namespace1"].metadata.name, "namespace1", "namespace created");
+
+                equal(client.objects["d072fb85-f70e-11e4-b829-10c37bdb8410"].metadata.name, "pod1", "pod object");
+                equal(client.objects["6e51438e-d161-11e4-acbc-10c37bdb8410"].metadata.name, "node1", "node object");
+            })
+            .always(function() {
+                equal(this.state(), "resolved", "succeeded");
+                $(client).off();
+                client.close();
+                start();
+            });
+    });
+
+    asyncTest("create namespace exists", function() {
+        expect(7);
+
+        var client = kubernetes.k8client();
+
+        var namespace_item = {
+            "apiVersion" : "v1beta3",
+            "kind" : "Namespace",
+            "metadata" : { "name": "namespace1" }
+        };
+
+        client.create(namespace_item)
+            .always(function() {
+                    equal(this.state(), "resolved", "namespace succeeded");
+                    equal(kube_data["namespaces/namespace1"].metadata.name, "namespace1", "namespace created");
+
+                    client.create(create_items, "namespace1")
+                        .done(function() {
+                            equal(kube_data["namespaces/namespace1/pods/pod1"].metadata.name, "pod1",
+                                  "pod created");
+                            equal(kube_data["nodes/node1"].metadata.name, "node1", "node created");
+
+                            equal(client.objects["d072fb85-f70e-11e4-b829-10c37bdb8410"].metadata.name,
+                                  "pod1", "pod object");
+                            equal(client.objects["6e51438e-d161-11e4-acbc-10c37bdb8410"].metadata.name,
+                                  "node1", "node object");
+                        })
+                        .always(function() {
+                            equal(this.state(), "resolved", "succeeded");
+
+                            $(client).off();
+                            client.close();
+                            start();
+                        });
+            });
+    });
+
+    asyncTest("create namespace default", function() {
+        expect(5);
+
+        var client = kubernetes.k8client();
+
+        client.create(create_items)
+            .done(function() {
+                equal(kube_data["namespaces/default/pods/pod1"].metadata.name, "pod1", "pod created");
+                equal(kube_data["nodes/node1"].metadata.name, "node1", "node created");
+
+                equal(client.objects["d072fb85-f70e-11e4-b829-10c37bdb8410"].metadata.name, "pod1", "pod object");
+                equal(client.objects["6e51438e-d161-11e4-acbc-10c37bdb8410"].metadata.name, "node1", "node object");
+            })
+            .always(function() {
+                equal(this.state(), "resolved", "succeeded");
+
+                $(client).off();
+                client.close();
+                start();
+            });
+    });
+
+    asyncTest("create object exists", function() {
+        expect(3);
+
+        var client = kubernetes.k8client();
+
+        var items = create_items.slice();
+        items.push(items[0]);
+
+        client.create(items, "namespace1")
+            .fail(function(ex, response) {
+                equal(ex.status, 409, "http already exists");
+                equal(response.code, 409, "kubernetes already exists");
+            })
+            .always(function() {
+                equal(this.state(), "rejected", "failed");
+
+                $(client).off();
+                client.close();
+                start();
+            });
+    });
+
+    QUnit.module("large", {
+        setup: function() {
+            kube_data = $.extend(true, { }, mock_basic, mock_large);
+        }
+    });
+
+    function has_unique_uids(items) {
+        var i, seen = { };
+        for (i = 0; i < items.length; i++) {
+            if (seen[items[i].metadata.uid])
+                return false;
+            seen[items[i].metadata.uid] = items[i];
+        }
+        return true;
+    }
+
+    asyncTest("select", function() {
+        var client = kubernetes.k8client();
+        $(client).on("pods", function(ev) {
+
+            /* Select everything odd, 500 pods */
+            var results = client.select({ "type": "odd" }, "default");
+            equal(results.length, 500, "correct amount");
+            ok(has_unique_uids(results), "unique objects");
+
+            /* Select everything odd, but wrong namespace, no pods */
+            var results = client.select({ "type": "odd" }, "other");
+            equal(results.length, 0, "other namespace no pods");
+
+            /* The same ones selected even when a second (present) label */
+            results = client.select({ "type": "odd", "tag": "silly"  }, "default");
+            equal(results.length, 500, "with additional label");
+            ok(has_unique_uids(results), "unique objects with additional label");
+
+            /* Nothing selected when additional invalid field */
+            results = client.select({ "type": "odd", "tag": "billy"  }, "default");
+            equal(results.length, 0, "no objects");
+
+            /* Limit by kind */
+            var results = client.select({ "type": "odd" }, "default", "Pod");
+            equal(results.length, 500, "by kind");
+            ok(has_unique_uids(results), "unique objects by kind");
+
+            /* Limit by invalid kind */
+            var results = client.select({ "type": "odd" }, "default", "Ood");
+            equal(results.length, 0, "nothing for invalid kind");
+
+            /* Everything selected when no selector */
+            results = client.select(null, "default");
+            equal(results.length, 1006, "all objects");
+
+            /* Everything selected when no selector */
+            results = client.select(null, "default", "Pod");
+            equal(results.length, 1002, "all pods");
+
+            /* Nothing selected when bad namespace */
+            results = client.select(null, "other");
+            equal(results.length, 0, "other namespace no objects");
+
+            /* Get the node when a null namespace */
+            results = client.select(null, undefined);
+            equal(results.length, 1, "without namespace");
+
+            /* Nothing selected when empty selector */
+            results = client.select({ }, "default");
+            equal(results.length, 0, "no objects");
+
+            $(client).off("pods");
+            client.close();
+            start();
+        });
+    });
+
+    asyncTest("infer", function() {
+        var client = kubernetes.k8client();
+        $(client).on("pods", function(ev) {
+
+            /* Start simple, exactly the labels selector matches */
+            var results = client.infer({ "tag": "silly", "type": "odd" }, "default");
+            equal(results.length, 1, "selected replication controller");
+            equal(results[0].metadata.name, "oddcontroller", "got oddcontroller");
+
+            /* Other namespace, no match */
+            var results = client.infer({ "tag": "silly", "type": "odd" }, "other");
+            equal(results.length, 0, "selected no controller");
+
+            /* Now with extra labels, as you'd usually see it */
+            results = client.infer({ "tag": "silly", "type": "odd", "another": "value" }, "default");
+            equal(results.length, 1, "selected controller with extra labels");
+            equal(results[0].metadata.name, "oddcontroller", "got oddcontroller with extra labels");
+
+            /* Make two replication controllers match */
+            results = client.infer({ "tag":"silly", "type":"odd", "another":"value", "factor3":"yes" }, "default");
+            equal(results.length, 2, "two replication controllers");
+            equal(results[0].metadata.name, "oddcontroller", "got oddcontroller in set");
+            equal(results[1].metadata.name, "3controller", "got 3controller in set");
+
+            /* Everything inferred when no labels */
+            results = client.infer(null, "default");
+            equal(results.length, 4, "all objects with selectors");
+
+            /* Everything inferred when no labels */
+            results = client.infer(null, "default", "ReplicationController");
+            equal(results.length, 2, "all replication controllers with selectors");
+
+            /* Nothing when wrong label */
+            results = client.infer(null, "other");
+            equal(results.length, 0, "no objects with other namespace");
+
+            /* Nothing inferred when empty label */
+            results = client.infer({ }, "default");
+            equal(results.length, 0, "no objects");
+
+            $(client).off("pods");
+            client.close();
+            start();
+        });
+    });
+
+    asyncTest("hosting", function() {
+        var client = kubernetes.k8client();
+        $(client).on("pods", function(ev) {
+
+            /* Find out which pods this node is hosting */
+            var results = client.hosting("127.0.0.1", "Pod");
+            equal(results.length, 1, "selected hosted pods");
+            equal(results[0].metadata.name, "wordpress", "got wordpress pod");
+
+            $(client).off("pods");
+            client.close();
+            start();
+        });
     });
 
     QUnit.start();

@@ -19,12 +19,14 @@
 
 var phantom_checkpoint = phantom_checkpoint || function () { };
 
-require([
+define([
     "jquery",
     "base1/cockpit",
-    'base1/po',
+    "shell/machines",
+    'translated!base1/po',
     "manifests"
-], function($, cockpit, po, manifests) {
+], function($, cockpit, machis, po, manifests) {
+
     cockpit.locale(po);
     var _ = cockpit.gettext;
 
@@ -112,7 +114,7 @@ require([
 
     $("#display-language-select-button").on("click", function(event) {
         var code_to_select = $("#display-language-list").val();
-        document.cookie = "cockpitlang=" + code_to_select;
+        window.localStorage.setItem("cockpit.lang", code_to_select);
         window.location.reload(true);
         return false;
     });
@@ -126,7 +128,6 @@ require([
 
     $(cockpit.info).on("changed", function() {
         $("#about-version").text(cockpit.info.version);
-        $("#about-build-info").text(cockpit.info.build);
         phantom_checkpoint();
     });
 
@@ -175,7 +176,7 @@ require([
     var current_location;
     var current_address;
 
-    var machines = new Machines();
+    var machines = new machis.instance();
     var frames = new Frames();
     var router = new Router();
     var packages = new Packages();
@@ -200,6 +201,10 @@ require([
             maybe_ready();
         })
         .on("added changed", function(ev, machine) {
+            if (machine.visible)
+                machine.connect();
+            else
+                frames.remove(machine);
             update_machines();
             if (machines.loaded)
                 navigate();
@@ -231,7 +236,7 @@ require([
                 });
             });
         })
-        .off("removed", function(ev, frame) {
+        .on("removed", function(ev, frame) {
             router.unregister(frame.contentWindow);
             $(frame.contentWindow).off();
             $(frame).off();
@@ -281,14 +286,17 @@ require([
         var component = null;
         var machine = null;
 
+        /* Main dashboard listing */
+        var listing = manifests["dashboard"];
+
         var at = 0;
         if (path.length === at) {
 
             /*
              * When more than one machine, we show dashboard by default
-             * otherwise we  show the server
+             * otherwise we show the server
              */
-            if (machines.list.length <= 1)
+            if (!listing || machines.list.length <= 1)
                 address = "localhost";
 
         } else if (path[at][0] == '@') {
@@ -301,7 +309,10 @@ require([
             /* If the machine is not available, then redirect to dashboard */
             machine = machines.lookup(address);
             if (!machine) {
-                cockpit.location.go("/dashboard/list");
+                if (listing)
+                    cockpit.location.go("/dashboard/list");
+                else
+                    cockpit.location.go("/");
                 return;
             }
 
@@ -425,12 +436,6 @@ require([
             if (component == "system/host") {
                 component = "shell/shell";
                 hash = "/server" + hash;
-            } else if (component == "system/init") {
-                component = "shell/shell";
-                if (options && options.s)
-                    hash = "/service";
-                else
-                    hash = "/services";
             } else if (component == "docker/containers") {
                 component = "shell/shell";
                 hash = "/containers" + hash;
@@ -529,7 +534,7 @@ require([
             var address = machine.address;
             if (!address)
                 address = "localhost";
-            var list = iframes[machines.address];
+            var list = iframes[machine.address];
             if (list) {
                 delete iframes[address];
                 $.each(list, function(i, frame) {
@@ -570,7 +575,7 @@ require([
                 if (address == "localhost")
                     base = "..";
                 else if (machine.checksum)
-                    base = "../../$" + machine.checksum;
+                    base = "../../" + machine.checksum;
                 else
                     base = "../../@" + machine.address;
 
@@ -663,7 +668,7 @@ require([
                 if (control.command === "init") {
                     peer.initialized = true;
                     var reply = $.extend({ }, cockpit.transport.options,
-                        { "default-host": peer.default_host, "channel-seed": peer.channel_seed }
+                        { "host": peer.default_host, "channel-seed": peer.channel_seed }
                     );
                     frame.postMessage("\n" + JSON.stringify(reply), origin);
 
@@ -680,6 +685,11 @@ require([
                 /* Only control messages with a channel are forwardable */
                 } else if (control.channel === undefined) {
                     return;
+
+                /* Add the frame's group to all open channel messages */
+                } else if (control.command == "open") {
+                    control.group = frame.name;
+                    data = "\n" + JSON.stringify(control);
                 }
             }
 
@@ -722,79 +732,10 @@ require([
                 return;
             }
 
+            /* Close all channels for this frame */
+            cockpit.kill(null, child.name);
             delete frame_peers_by_seed[peer.channel_seed];
             delete frame_peers_by_name[child.name];
-        };
-    }
-
-    function Machines() {
-        var self = this;
-        var flat = null;
-
-        /* TODO: This should be migrated away from cockpitd */
-
-        var client = cockpit.dbus("com.redhat.Cockpit", { bus: "session", track: true });
-        var proxies = client.proxies("com.redhat.Cockpit.Machine", "/com/redhat/Cockpit/Machines");
-
-        function hostname_label(name) {
-            if (!name || name == "localhost" || name == "localhost.localdomain")
-                return window.location.hostname;
-            return name;
-        }
-
-        var map = { };
-        $(proxies).on('added changed', function(ev, proxy) {
-            var machine = map[proxy.Address];
-            if (!machine)
-                machine = { };
-            machine.address = proxy.Address;
-            machine.label = hostname_label(proxy.Name || proxy.Address);
-            machine.color = proxy.Color;
-            machine.avatar = proxy.Avatar || "images/server-small.png";
-            machine.tags = proxy.Tags || [];
-            map[proxy.Address] = machine;
-            flat = null;
-            $(self).triggerHandler(ev.type, machine);
-        });
-
-        $(proxies).on('removed', function(ev, proxy) {
-            var machine = map[proxy.Address];
-            delete map[proxy.Address];
-            flat = null;
-            $(self).triggerHandler('removed', machine);
-        });
-
-        proxies.wait(function() {
-            flat = null;
-            $(self).triggerHandler('ready');
-        });
-
-        Object.defineProperty(self, "list", {
-            enumerable: true,
-            get: function get() {
-                if (!flat) {
-                    flat = [];
-                    for (var key in map) {
-                        if ($.inArray("dashboard", map[key].tags) !== -1)
-                            flat.push(map[key]);
-                    }
-                    flat.sort(function(m1, m2) {
-                        return m2.label.localeCompare(m2.label);
-                    });
-                }
-                return flat;
-            }
-        });
-
-        self.lookup = function lookup(address) {
-            return map[address || "localhost"] || null;
-        };
-
-        self.close = function close() {
-            if (proxies)
-                $(proxies).off();
-            if (client)
-                client.close();
         };
     }
 
@@ -850,7 +791,7 @@ require([
 
             var url;
             if (machine.checksum)
-                url = "../../$" + machine.checksum + "/manifests.json";
+                url = "../../" + machine.checksum + "/manifests.json";
             else
                 url = "../../@" + machine.address + "/manifests.json";
 
@@ -858,8 +799,8 @@ require([
                 .done(function(manis) {
                     machine.components = self.build(manis);
                     var etag = req.getResponseHeader("ETag");
-                    if (etag)
-                        machine.checksum = etag;
+                    if (etag) /* and remove quotes */
+                        machine.checksum = etag.replace(/^"(.+)"$/, '$1');
                 })
                 .fail(function(ex) {
                     console.warn("failed to load manifests from " + machine.address + ": " + ex);

@@ -50,16 +50,18 @@ __all__ = (
 
     'sit',
 
-    'check',
-    'check_eq',
-    'check_not_eq',
-    'check_in',
-    'check_not_in',
     'wait',
+    'RepeatThis',
 
     # Random utilities
     'merge'
     )
+
+class RepeatThis(Exception):
+    def __init__(self, msg):
+        self.msg = msg
+    def __str__(self):
+        return self.msg
 
 topdir = os.path.normpath(os.path.dirname(__file__))
 
@@ -132,6 +134,8 @@ class Browser:
         self.phantom.do("ph_init()")
 
     def reload(self):
+        self.switch_to_top()
+        self.wait_js_cond("ph_select('iframe.container-frame').every(function (e) { return e.getAttribute('data-loaded'); })")
         self.phantom.reload()
         self.init_after_load()
 
@@ -145,6 +149,9 @@ class Browser:
 
     def switch_to_top(self):
         self.phantom.switch_to_top()
+
+    def upload_file(self, selector, file):
+        self.phantom.upload_file(selector, file)
 
     def eval_js(self, code):
         return self.phantom.do(code)
@@ -220,6 +227,9 @@ class Browser:
     def wait_attr(self, selector, attr, val):
         return self.wait_js_func('ph_has_attr', selector, attr, val)
 
+    def wait_not_attr(self, selector, attr, val):
+        return self.wait_js_func('!ph_has_attr', selector, attr, val)
+
     def wait_not_visible(self, selector):
         return self.wait_js_func('!ph_is_visible', selector)
 
@@ -261,6 +271,27 @@ class Browser:
         """
         self.wait_not_visible('#' + id)
 
+    def dialog_complete(self, sel, button=".btn-primary", result="hide"):
+        self.click(sel + " " + button)
+        self.wait_not_present(sel + " .dialog-wait")
+
+        dialog_visible = self.call_js_func('ph_is_visible', sel)
+        if result == "hide":
+            if dialog_visible:
+                raise AssertionError(sel + " dialog did not complete and close")
+        elif result == "fail":
+            if not dialog_visible:
+                raise AssertionError(sel + " dialog is closed no failures present")
+            dialog_error = self.call_js_func('ph_is_present', sel + " .dialog-error")
+            if not dialog_error:
+                raise AssertionError(sel + " dialog has no errors")
+        else:
+            raise Error("invalid dialog result argument: " + result)
+
+    def dialog_cancel(self, sel, button=".btn[data-dismiss='modal']"):
+        self.click(sel + " " + button)
+        self.wait_not_visible(sel)
+
     def enter_page(self, id, host="localhost"):
         """Wait for a page to become current.
 
@@ -274,7 +305,7 @@ class Browser:
             if host:
                 frame = host + id
             else:
-                frame = id[1:]
+                frame = "localhost" + id
         else:
             if host:
                 frame = host + "/shell/shell"
@@ -356,7 +387,8 @@ class MachineCase(unittest.TestCase):
     machines = [ ]
 
     def new_machine(self, flavor=None):
-        m = self.machine_class(verbose=arg_trace, flavor=flavor)
+        (unused, sep, label) = self.id().rpartition(".")
+        m = self.machine_class(verbose=arg_trace, flavor=flavor, label="%s-%s" % (program_name, label))
         self.addCleanup(lambda: m.kill())
         self.machines.append(m)
         return m
@@ -405,6 +437,9 @@ class MachineCase(unittest.TestCase):
         "GLib-GIO:ERROR:gdbusobjectmanagerserver\\.c:.*:g_dbus_object_manager_server_emit_interfaces_.*: assertion failed \\(error == NULL\\): The connection is closed \\(g-io-error-quark, 18\\)",
         "Error sending message: The connection is closed",
 
+        # Will go away with glib 2.43.2
+        ".*: couldn't write web output: Error sending data: Connection reset by peer",
+
         ## Bugs
 
         # https://bugs.freedesktop.org/show_bug.cgi?id=70540
@@ -431,9 +466,9 @@ class MachineCase(unittest.TestCase):
             self.allowed_messages.append(p)
 
     def allow_restart_journal_messages(self):
-        self.allow_journal_messages("Error receiving data: Connection reset by peer",
+        self.allow_journal_messages(".*Connection reset by peer.*",
+                                    ".*Broken pipe.*",
                                     "g_dbus_connection_real_closed: Remote peer vanished with error: Underlying GIOStream returned 0 bytes on an async read \\(g-io-error-quark, 0\\). Exiting.",
-                                    "g_dbus_connection_real_closed: Remote peer vanished with error: Error sending message: Broken pipe \\(g-io-error-quark, 44\\). Exiting.",
                                     # HACK: https://bugzilla.redhat.com/show_bug.cgi?id=1141137
                                     "localhost: bridge program failed: Child process killed by signal 9",
                                     "request timed out, closing")
@@ -441,7 +476,7 @@ class MachineCase(unittest.TestCase):
     def check_journal_messages(self, machine=None):
         """Check for unexpected journal entries."""
         machine = machine or self.machine
-        syslog_ids = [ "cockpitd", "cockpit-ws" ]
+        syslog_ids = [ "cockpit-wrapper", "cockpit-ws" ]
         messages = machine.journal_messages(syslog_ids, 5)
         messages += machine.audit_messages("14") # 14xx is selinux
         all_found = True
@@ -530,6 +565,9 @@ class Phantom:
     def switch_to_top(self):
         return self.run({'cmd': 'switch_top'})
 
+    def upload_file(self, selector, file):
+        return self.run({'cmd': 'upload', 'file': file, 'selector': selector})
+
     def do(self, code):
         return self.run({'cmd': 'do', 'code': code})
 
@@ -596,8 +634,21 @@ def test_main():
         suite = unittest.TestLoader().loadTestsFromNames(args.tests, module=__main__)
     else:
         suite = unittest.TestLoader().loadTestsFromModule(__main__)
-    runner = unittest.TextTestRunner(verbosity=args.verbosity, failfast=True, resultclass=Result)
-    result = runner.run(suite)
+
+    tries = 0
+    repeat_this = True
+    while repeat_this and tries < 5:
+        runner = unittest.TextTestRunner(verbosity=args.verbosity, failfast=True, resultclass=Result)
+        result = runner.run(suite)
+        repeat_this = False
+        for e in result.errors:
+            if "RepeatThis: " in e[1]:
+                repeat_this = True
+        tries += 1
+
+    if repeat_this:
+        print "Not repeating after %d spurious failures" % tries
+
     sys.exit(not result.wasSuccessful())
 
 class Error(Exception):
@@ -642,24 +693,6 @@ def wait(func, msg=None, delay=1, tries=60):
         sleep(delay)
     raise Error(msg or "Condition did not become true.")
 
-def check(cond, msg=None):
-    if not cond:
-        raise Error(msg or "Condition is not true")
-    else:
-        return True
-
-def check_eq(val, expected, source = "Value"):
-    return check (val == expected, "%s is '%s', not '%s' as expected" % ( source, val, expected ))
-
-def check_not_eq(val, expected, source = "Value"):
-    return check (val != expected, "%s is '%s', not something else as expected" % ( source, val ))
-
-def check_in(val, expected, source = "Value"):
-    return check (expected in val, "%s is '%s', which doesn't include '%s' as expected" % ( source, val, expected ))
-
-def check_not_in(val, expected, source = "Value"):
-    return check (expected not in val, "%s is '%s', which includes '%s', but that isn't expected" % ( source, val, expected ))
-
 def sit():
     """
     Wait until the user confirms to continue.
@@ -667,7 +700,10 @@ def sit():
     The current test case is suspended so that the user can inspect
     the browser.
     """
-    raw_input ("Press RET to continue... ")
+    sys.stdout.write("Press Ctrl-C to continue... ")
+    sys.stdout.flush()
+    while True:
+        sleep(60)
 
 def merge(*args):
     return dict(reduce(lambda x,y: x + y, map(lambda d: d.items(), args), [ ]))

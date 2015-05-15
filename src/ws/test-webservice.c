@@ -30,6 +30,7 @@
 #include "common/cockpittest.h"
 #include "common/mock-io-stream.h"
 #include "common/cockpitwebserver.h"
+#include "common/cockpitconf.h"
 
 #include "websocket/websocket.h"
 
@@ -77,6 +78,7 @@ typedef struct {
 typedef struct {
   WebSocketFlavor web_socket_flavor;
   const char *origin;
+  const char *config;
 } TestFixture;
 
 static GString *
@@ -184,6 +186,7 @@ setup_mock_webserver (TestCase *test,
                       gconstpointer data)
 {
   const gchar *roots[] = { SRCDIR "/src/ws", NULL };
+
   GError *error = NULL;
   const gchar *user;
 
@@ -442,6 +445,7 @@ start_web_service_and_create_client (TestCase *test,
                                      WebSocketConnection **ws,
                                      CockpitWebService **service)
 {
+  cockpit_config_file = fixture ? fixture->config : NULL;
   const char *origin = fixture ? fixture->origin : NULL;
   if (!origin)
     origin = "http://127.0.0.1";
@@ -479,7 +483,7 @@ start_web_service_and_connect_client (TestCase *test,
   g_assert (web_socket_connection_get_ready_state (*ws) == WEB_SOCKET_STATE_OPEN);
 
   /* Send the open control message that starts the bridge. */
-  send_control_message (*ws, "init", NULL, BUILD_INTS, "version", 0, NULL);
+  send_control_message (*ws, "init", NULL, BUILD_INTS, "version", 1, NULL);
   send_control_message (*ws, "open", "4", "payload", "test-text", NULL);
 
   /* This message should be echoed */
@@ -510,6 +514,7 @@ close_client_and_stop_web_service (TestCase *test,
   while (service != NULL)
     g_main_context_iteration (NULL, TRUE);
   g_source_remove (timeout);
+  cockpit_conf_cleanup ();
 }
 
 static void
@@ -601,7 +606,7 @@ test_echo_large (TestCase *test,
   g_assert (web_socket_connection_get_ready_state (ws) == WEB_SOCKET_STATE_OPEN);
 
   /* Send the open control message that starts the bridge. */
-  send_control_message (ws, "init", NULL, BUILD_INTS, "version", 0, NULL);
+  send_control_message (ws, "init", NULL, BUILD_INTS, "version", 1, NULL);
   send_control_message (ws, "open", "4", "payload", "test-text", NULL);
   handler = g_signal_connect (ws, "message", G_CALLBACK (on_message_get_non_control), &received);
 
@@ -740,7 +745,7 @@ test_wrong_init_version (TestCase *test,
   /* We should now get a failure */
   while (received == NULL)
     g_main_context_iteration (NULL, TRUE);
-  expect_control_message (received, "close", NULL, "problem", "protocol-error", NULL);
+  expect_control_message (received, "close", NULL, "problem", "not-supported", NULL);
   g_bytes_unref (received);
   received = NULL;
 
@@ -762,10 +767,10 @@ test_bad_init_version (TestCase *test,
     g_main_context_iteration (NULL, TRUE);
   g_assert (web_socket_connection_get_ready_state (ws) == WEB_SOCKET_STATE_OPEN);
 
-  cockpit_expect_message ("*socket used unsupported*");
+  cockpit_expect_warning ("*invalid version field*");
   cockpit_expect_log ("WebSocket", G_LOG_LEVEL_MESSAGE, "connection unexpectedly closed*");
 
-  send_control_message (ws, "init", NULL, BUILD_INTS, "version", "blah", NULL);
+  send_control_message (ws, "init", NULL, "version", "blah", NULL);
 
   /* The init from the other end */
   while (received == NULL)
@@ -798,7 +803,7 @@ test_specified_creds (TestCase *test,
   g_assert (web_socket_connection_get_ready_state (ws) == WEB_SOCKET_STATE_OPEN);
 
   /* Open a channel with a non-standard command */
-  send_control_message (ws, "init", NULL, BUILD_INTS, "version", 0, NULL);
+  send_control_message (ws, "init", NULL, BUILD_INTS, "version", 1, NULL);
   send_control_message (ws, "open", "4",
                         "payload", "test-text",
                         "user", "user", "password",
@@ -833,7 +838,7 @@ test_specified_creds_fail (TestCase *test,
   g_signal_connect (ws, "message", G_CALLBACK (on_message_get_bytes), &received);
 
   /* Open a channel with a non-standard command, but a bad password */
-  send_control_message (ws, "init", NULL, BUILD_INTS, "version", 0, NULL);
+  send_control_message (ws, "init", NULL, BUILD_INTS, "version", 1, NULL);
   send_control_message (ws, "open", "4",
                         "payload", "test-text",
                         "user", "user",
@@ -850,7 +855,7 @@ test_specified_creds_fail (TestCase *test,
   WAIT_UNTIL (received != NULL);
 
   /* Should have gotten a failure message, about the credentials */
-  expect_control_message (received, "close", "4", "problem", "not-authorized", NULL);
+  expect_control_message (received, "close", "4", "problem", "authentication-failed", NULL);
   g_bytes_unref (received);
 
   close_client_and_stop_web_service (test, ws, service);
@@ -987,7 +992,7 @@ test_expect_host_key (TestCase *test,
   WAIT_UNTIL (web_socket_connection_get_ready_state (ws) != WEB_SOCKET_STATE_CONNECTING);
   g_assert (web_socket_connection_get_ready_state (ws) == WEB_SOCKET_STATE_OPEN);
 
-  send_control_message (ws, "init", NULL, BUILD_INTS, "version", 0, NULL);
+  send_control_message (ws, "init", NULL, BUILD_INTS, "version", 1, NULL);
   send_control_message (ws, "open", "4",
                         "payload", "test-text",
                         "host-key", knownhosts,
@@ -1024,11 +1029,25 @@ test_expect_host_key (TestCase *test,
 static const TestFixture fixture_bad_origin_rfc6455 = {
   .web_socket_flavor = WEB_SOCKET_FLAVOR_RFC6455,
   .origin = "http://another-place.com",
+  .config = NULL
 };
 
 static const TestFixture fixture_bad_origin_hixie76 = {
   .web_socket_flavor = WEB_SOCKET_FLAVOR_HIXIE76,
   .origin = "http://another-place.com",
+  .config = NULL
+};
+
+static const TestFixture fixture_allowed_origin_rfc6455 = {
+  .web_socket_flavor = WEB_SOCKET_FLAVOR_RFC6455,
+  .origin = "https://another-place.com",
+  .config = SRCDIR "/src/ws/mock-config.conf"
+};
+
+static const TestFixture fixture_allowed_origin_hixie76 = {
+  .web_socket_flavor = WEB_SOCKET_FLAVOR_HIXIE76,
+  .origin = "https://another-place.com:9090",
+  .config = SRCDIR "/src/ws/mock-config.conf"
 };
 
 static void
@@ -1058,6 +1077,7 @@ test_bad_origin (TestCase *test,
   g_clear_error (&error);
 }
 
+
 static void
 test_fail_spawn (TestCase *test,
                  gconstpointer data)
@@ -1086,6 +1106,166 @@ test_fail_spawn (TestCase *test,
   /* But we should have gotten failure message, about the spawn */
   expect_control_message (received, "close", "4", "problem", "no-cockpit", NULL);
   g_bytes_unref (received);
+
+  close_client_and_stop_web_service (test, ws, service);
+}
+
+static void
+test_kill_group (TestCase *test,
+                 gconstpointer data)
+{
+  WebSocketConnection *ws;
+  GBytes *received = NULL;
+  CockpitWebService *service;
+  GHashTable *seen;
+  gchar *ochannel;
+  const gchar *channel;
+  const gchar *command;
+  JsonObject *options;
+  GBytes *sent;
+  GBytes *payload;
+  gulong handler;
+
+  /* Sends a "test" message in channel "4" */
+  start_web_service_and_connect_client (test, data, &ws, &service);
+
+  sent = g_bytes_new_static ("4\ntest", 6);
+  handler = g_signal_connect (ws, "message", G_CALLBACK (on_message_get_non_control), &received);
+
+  /* Drain the initial message */
+  WAIT_UNTIL (received != NULL);
+  g_assert (g_bytes_equal (sent, received));
+  g_bytes_unref (received);
+  received = NULL;
+
+  g_signal_handler_disconnect (ws, handler);
+  handler = g_signal_connect (ws, "message", G_CALLBACK (on_message_get_bytes), &received);
+
+  seen = g_hash_table_new (g_str_hash, g_str_equal);
+  g_hash_table_add (seen, "a");
+  g_hash_table_add (seen, "b");
+  g_hash_table_add (seen, "c");
+
+  send_control_message (ws, "open", "a", "payload", "echo", "group", "test", NULL);
+  send_control_message (ws, "open", "b", "payload", "echo", "group", "test", NULL);
+  send_control_message (ws, "open", "c", "payload", "echo", "group", "test", NULL);
+
+  /* Kill all the above channels */
+  send_control_message (ws, "kill", NULL, "group", "test", NULL);
+
+  /* All the close messages */
+  while (g_hash_table_size (seen) > 0)
+    {
+      WAIT_UNTIL (received != NULL);
+
+      payload = cockpit_transport_parse_frame (received, &ochannel);
+      g_bytes_unref (received);
+      received = NULL;
+
+      g_assert (payload != NULL);
+      g_assert_cmpstr (ochannel, ==, NULL);
+      g_free (ochannel);
+
+      g_assert (cockpit_transport_parse_command (payload, &command, &channel, &options));
+      g_bytes_unref (payload);
+
+      if (!g_str_equal (command, "open"))
+        {
+          g_assert_cmpstr (command, ==, "close");
+          g_assert_cmpstr (json_object_get_string_member (options, "problem"), ==, "terminated");
+          g_assert (g_hash_table_remove (seen, channel));
+        }
+      json_object_unref (options);
+    }
+
+  g_hash_table_destroy (seen);
+
+  g_signal_handler_disconnect (ws, handler);
+  handler = g_signal_connect (ws, "message", G_CALLBACK (on_message_get_non_control), &received);
+
+  /* Now verify that the original channel is still open */
+  web_socket_connection_send (ws, WEB_SOCKET_DATA_TEXT, NULL, sent);
+
+  WAIT_UNTIL (received != NULL);
+  g_assert (g_bytes_equal (received, sent));
+  g_bytes_unref (sent);
+  g_bytes_unref (received);
+  received = NULL;
+
+  g_signal_handler_disconnect (ws, handler);
+
+  close_client_and_stop_web_service (test, ws, service);
+}
+
+static void
+test_kill_host (TestCase *test,
+                gconstpointer data)
+{
+  WebSocketConnection *ws;
+  GBytes *received = NULL;
+  CockpitWebService *service;
+  GHashTable *seen;
+  gchar *ochannel;
+  const gchar *channel;
+  const gchar *command;
+  JsonObject *options;
+  GBytes *payload;
+  gulong handler;
+
+  /* Sends a "test" message in channel "4" */
+  start_web_service_and_connect_client (test, data, &ws, &service);
+
+  handler = g_signal_connect (ws, "message", G_CALLBACK (on_message_get_non_control), &received);
+
+  /* Drain the initial message */
+  WAIT_UNTIL (received != NULL);
+  g_bytes_unref (received);
+  received = NULL;
+
+  g_signal_handler_disconnect (ws, handler);
+  handler = g_signal_connect (ws, "message", G_CALLBACK (on_message_get_bytes), &received);
+
+  seen = g_hash_table_new (g_str_hash, g_str_equal);
+  g_hash_table_add (seen, "a");
+  g_hash_table_add (seen, "b");
+  g_hash_table_add (seen, "c");
+  g_hash_table_add (seen, "4");
+
+  send_control_message (ws, "open", "a", "payload", "echo", "group", "test", NULL);
+  send_control_message (ws, "open", "b", "payload", "echo", "group", "test", NULL);
+  send_control_message (ws, "open", "c", "payload", "echo", "group", "test", NULL);
+
+  /* Kill all the above channels */
+  send_control_message (ws, "kill", NULL, "host", "localhost", NULL);
+
+  /* All the close messages */
+  while (g_hash_table_size (seen) > 0)
+    {
+      WAIT_UNTIL (received != NULL);
+
+      payload = cockpit_transport_parse_frame (received, &ochannel);
+      g_bytes_unref (received);
+      received = NULL;
+
+      g_assert (payload != NULL);
+      g_assert_cmpstr (ochannel, ==, NULL);
+      g_free (ochannel);
+
+      g_assert (cockpit_transport_parse_command (payload, &command, &channel, &options));
+      g_bytes_unref (payload);
+
+      if (!g_str_equal (command, "open"))
+        {
+          g_assert_cmpstr (command, ==, "close");
+          g_assert_cmpstr (json_object_get_string_member (options, "problem"), ==, "terminated");
+          g_assert (g_hash_table_remove (seen, channel));
+        }
+      json_object_unref (options);
+    }
+
+  g_hash_table_destroy (seen);
+
+  g_signal_handler_disconnect (ws, handler);
 
   close_client_and_stop_web_service (test, ws, service);
 }
@@ -1124,7 +1304,7 @@ test_timeout_session (TestCase *test,
   sig = g_signal_connect (ws, "message", G_CALLBACK (on_message_get_bytes), &received);
 
   /* Queue channel open/close, so we can guarantee having a session */
-  send_control_message (ws, "init", NULL, BUILD_INTS, "version", 0, NULL);
+  send_control_message (ws, "init", NULL, BUILD_INTS, "version", 1, NULL);
   send_control_message (ws, "open", "11x", "payload", "test-text", NULL);
 
   while (received == NULL)
@@ -1286,7 +1466,7 @@ test_logout (TestCase *test,
   g_assert (web_socket_connection_get_ready_state (ws) == WEB_SOCKET_STATE_OPEN);
 
   /* Send the logout control message */
-  send_control_message (ws, "init", NULL, BUILD_INTS, "version", 0, NULL);
+  send_control_message (ws, "init", NULL, BUILD_INTS, "version", 1, NULL);
 
   data = "\n{ \"command\": \"logout\", \"disconnect\": true }";
   message = g_bytes_new_static (data, strlen (data));
@@ -1359,6 +1539,7 @@ setup_resource (TestResourceCase *tc,
   g_object_unref (input);
 
   tc->headers = cockpit_web_server_new_table ();
+  g_hash_table_insert (tc->headers, g_strdup ("Accept-Encoding"), g_strdup ("gzip, identity"));
 }
 
 static void
@@ -1567,8 +1748,8 @@ test_resource_checksum (TestResourceCase *tc,
                            "Cache-Control: max-age=31556926, public\r\n"
                            "Transfer-Encoding: chunked\r\n"
                            "\r\n"
-                           "2d\r\n"
-                           "This is the minified file.ext Oh marmalaaade\n"
+                           "32\r\n"
+                           "These are the contents of file.ext\nOh marmalaaade\n"
                            "\r\n"
                            "0\r\n\r\n", -1);
   g_bytes_unref (bytes);
@@ -1718,16 +1899,15 @@ test_resource_bad_checksum (TestResourceCase *tc,
 }
 
 static void
-test_resource_accept_language (TestResourceCase *tc,
+test_resource_language_suffix (TestResourceCase *tc,
                                gconstpointer data)
 {
   CockpitWebResponse *response;
   GError *error = NULL;
   GBytes *bytes;
 
-  response = cockpit_web_response_new (tc->io, "/cockpit/@localhost/another/test.html", NULL, NULL);
+  response = cockpit_web_response_new (tc->io, "/cockpit/@localhost/another/test.de.html", NULL, NULL);
 
-  g_hash_table_insert (tc->headers, g_strdup ("Accept-Language"), g_strdup ("pig;q=0.1,de;q=0.9"));
   cockpit_web_service_resource (tc->service, tc->headers, response);
 
   while (cockpit_web_response_get_state (response) != COCKPIT_WEB_RESPONSE_SENT)
@@ -1739,7 +1919,6 @@ test_resource_accept_language (TestResourceCase *tc,
   bytes = g_memory_output_stream_steal_as_bytes (tc->output);
   cockpit_assert_bytes_eq (bytes,
                            "HTTP/1.1 200 OK\r\n"
-                           "Vary: Cookie, Accept-Language\r\n"
                            "Content-Type: text/html\r\n"
                            "Transfer-Encoding: chunked\r\n"
                            "\r\n"
@@ -1757,18 +1936,16 @@ test_resource_accept_language (TestResourceCase *tc,
 }
 
 static void
-test_resource_override_language (TestResourceCase *tc,
+test_resource_language_fallback (TestResourceCase *tc,
                                  gconstpointer data)
 {
   CockpitWebResponse *response;
   GError *error = NULL;
   GBytes *bytes;
 
-  response = cockpit_web_response_new (tc->io, "/cockpit/@localhost/another/test.html", NULL, NULL);
+  response = cockpit_web_response_new (tc->io, "/cockpit/@localhost/another/test.fi.html", NULL, NULL);
 
   /* Language cookie overrides */
-  g_hash_table_insert (tc->headers, g_strdup ("Accept-Language"), g_strdup ("de;q=0.9"));
-  g_hash_table_insert (tc->headers, g_strdup ("Cookie"), g_strdup ("cockpitlang=pig"));
   cockpit_web_service_resource (tc->service, tc->headers, response);
 
   while (cockpit_web_response_get_state (response) != COCKPIT_WEB_RESPONSE_SENT)
@@ -1780,19 +1957,51 @@ test_resource_override_language (TestResourceCase *tc,
   bytes = g_memory_output_stream_steal_as_bytes (tc->output);
   cockpit_assert_bytes_eq (bytes,
                            "HTTP/1.1 200 OK\r\n"
-                           "Vary: Cookie, Accept-Language\r\n"
                            "Content-Type: text/html\r\n"
                            "Transfer-Encoding: chunked\r\n"
                            "\r\n"
-                           "60\r\n"
+                           "52\r\n"
                            "<html>\n"
                            "<head>\n"
-                           "<title>Inlay omehay irday</title>\n"
+                           "<title>In home dir</title>\n"
                            "</head>\n"
-                           "<body>Inlay omehay irday</body>\n"
+                           "<body>In home dir</body>\n"
                            "</html>\n"
                            "\r\n"
                            "0\r\n\r\n", -1);
+  g_bytes_unref (bytes);
+  g_object_unref (response);
+}
+
+static void
+test_resource_gzip_encoding (TestResourceCase *tc,
+                             gconstpointer data)
+{
+  CockpitWebResponse *response;
+  GError *error = NULL;
+  GBytes *bytes;
+
+  response = cockpit_web_response_new (tc->io, "/cockpit/@localhost/another/test-file.txt", NULL, NULL);
+
+  cockpit_web_service_resource (tc->service, tc->headers, response);
+
+  while (cockpit_web_response_get_state (response) != COCKPIT_WEB_RESPONSE_SENT)
+    g_main_context_iteration (NULL, TRUE);
+
+  g_output_stream_close (G_OUTPUT_STREAM (tc->output), NULL, &error);
+  g_assert_no_error (error);
+
+  bytes = g_memory_output_stream_steal_as_bytes (tc->output);
+  cockpit_assert_bytes_eq (bytes,
+                           "HTTP/1.1 200 OK\r\n"
+                           "Content-Encoding: gzip\r\n"
+                           "Content-Type: text/plain\r\n"
+                           "Transfer-Encoding: chunked\r\n"
+                           "\r\n"
+                           "34\r\n"
+                           "\x1F\x8B\x08\x08N1\x03U\x00\x03test-file.txt\x00sT(\xCEM\xCC\xC9Q(I-"
+                           ".QH\xCB\xCCI\xE5\x02\x00>PjG\x12\x00\x00\x00\x0D\x0A" "0\x0D\x0A\x0D\x0A",
+                           160);
   g_bytes_unref (bytes);
   g_object_unref (response);
 }
@@ -1824,10 +2033,12 @@ main (int argc,
 
   static const TestFixture fixture_rfc6455 = {
       .web_socket_flavor = WEB_SOCKET_FLAVOR_RFC6455,
+      .config = NULL
   };
 
   static const TestFixture fixture_hixie76 = {
       .web_socket_flavor = WEB_SOCKET_FLAVOR_HIXIE76,
+      .config = NULL
   };
 
   g_test_add ("/web-service/handshake-and-auth/rfc6455", TestCase,
@@ -1874,6 +2085,15 @@ main (int argc,
   g_test_add ("/web-service/bad-origin/hixie76", TestCase,
               &fixture_bad_origin_hixie76, setup_for_socket,
               test_bad_origin, teardown_for_socket);
+  g_test_add ("/web-service/bad-origin/withallowed", TestCase,
+              &fixture_bad_origin_rfc6455, setup_for_socket,
+              test_bad_origin, teardown_for_socket);
+  g_test_add ("/web-service/allowed-origin/rfc6455", TestCase,
+              &fixture_allowed_origin_rfc6455, setup_for_socket,
+              test_handshake_and_auth, teardown_for_socket);
+  g_test_add ("/web-service/allowed-origin/hixie76", TestCase,
+              &fixture_allowed_origin_hixie76, setup_for_socket,
+              test_handshake_and_auth, teardown_for_socket);
 
   g_test_add ("/web-service/fail-spawn/rfc6455", TestCase,
               &fixture_rfc6455, setup_for_socket,
@@ -1881,6 +2101,11 @@ main (int argc,
   g_test_add ("/web-service/fail-spawn/hixie76", TestCase,
               &fixture_hixie76, setup_for_socket,
               test_fail_spawn, teardown_for_socket);
+
+  g_test_add ("/web-service/kill-group", TestCase, &fixture_rfc6455,
+              setup_for_socket, test_kill_group, teardown_for_socket);
+  g_test_add ("/web-service/kill-host", TestCase, &fixture_rfc6455,
+              setup_for_socket, test_kill_host, teardown_for_socket);
 
   g_test_add ("/web-service/specified-creds", TestCase,
               &fixture_rfc6455, setup_for_socket_spec,
@@ -1916,10 +2141,13 @@ main (int argc,
               setup_resource, test_resource_no_checksum, teardown_resource);
   g_test_add ("/web-service/resource/bad-checksum", TestResourceCase, NULL,
               setup_resource, test_resource_bad_checksum, teardown_resource);
-  g_test_add ("/web-service/resource/accept-language", TestResourceCase, NULL,
-              setup_resource, test_resource_accept_language, teardown_resource);
-  g_test_add ("/web-service/resource/override-language", TestResourceCase, NULL,
-              setup_resource, test_resource_override_language, teardown_resource);
+  g_test_add ("/web-service/resource/language-suffix", TestResourceCase, NULL,
+              setup_resource, test_resource_language_suffix, teardown_resource);
+  g_test_add ("/web-service/resource/language-fallback", TestResourceCase, NULL,
+              setup_resource, test_resource_language_fallback, teardown_resource);
+
+  g_test_add ("/web-service/resource/gzip-encoding", TestResourceCase, NULL,
+              setup_resource, test_resource_gzip_encoding, teardown_resource);
 
   return g_test_run ();
 }

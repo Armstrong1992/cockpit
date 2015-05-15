@@ -317,6 +317,39 @@ test_content_type (TestCase *tc,
 }
 
 static void
+test_content_encoding (TestCase *tc,
+                       gconstpointer data)
+{
+  const gchar *resp;
+  GBytes *content;
+
+  g_assert_cmpint (cockpit_web_response_get_state (tc->response), ==, COCKPIT_WEB_RESPONSE_READY);
+
+  cockpit_web_response_headers (tc->response, 200, "OK", 50,
+                                "Content-Encoding", "blah",
+                                NULL);
+
+  g_assert_cmpint (cockpit_web_response_get_state (tc->response), ==, COCKPIT_WEB_RESPONSE_QUEUING);
+
+  while (g_main_context_iteration (NULL, FALSE));
+
+  content = g_bytes_new_static ("Cockpit is perfect for new sysadmins, ", 38);
+  cockpit_web_response_queue (tc->response, content);
+  g_bytes_unref (content);
+
+  cockpit_web_response_complete (tc->response);
+
+  g_assert_cmpint (cockpit_web_response_get_state (tc->response), ==, COCKPIT_WEB_RESPONSE_COMPLETE);
+
+  resp = output_as_string (tc);
+  g_assert_cmpint (cockpit_web_response_get_state (tc->response), ==, COCKPIT_WEB_RESPONSE_SENT);
+
+  g_assert_cmpstr (resp, ==, "HTTP/1.1 200 OK\r\nContent-Encoding: blah\r\n"
+                   "Content-Length: 50\r\nTransfer-Encoding: chunked\r\n\r\n"
+                   "26\r\nCockpit is perfect for new sysadmins, \r\n0\r\n\r\n");
+}
+
+static void
 test_stream (TestCase *tc,
              gconstpointer data)
 {
@@ -386,6 +419,50 @@ test_chunked_transfer_encoding (TestCase *tc,
   g_assert_cmpstr (resp, ==, "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"
                    "26\r\nCockpit is perfect for new sysadmins, \r\n"
                    "4d\r\nallowing them to easily perform simple tasks such as storage administration, \r\n"
+                   "37\r\ninspecting journals and starting and stopping services.\r\n0\r\n\r\n");
+}
+
+static void
+test_chunked_zero_length (TestCase *tc,
+                          gconstpointer data)
+{
+  const gchar *resp;
+  GBytes *content;
+
+  g_assert_cmpint (cockpit_web_response_get_state (tc->response), ==, COCKPIT_WEB_RESPONSE_READY);
+
+  cockpit_web_response_headers (tc->response, 200, "OK", -1, NULL);
+
+  g_assert_cmpint (cockpit_web_response_get_state (tc->response), ==, COCKPIT_WEB_RESPONSE_QUEUING);
+
+  while (g_main_context_iteration (NULL, FALSE));
+
+  content = g_bytes_new_static ("Cockpit is perfect for new sysadmins, ", 38);
+  cockpit_web_response_queue (tc->response, content);
+  g_bytes_unref (content);
+
+  content = g_bytes_new_static ("", 0);
+  cockpit_web_response_queue (tc->response, content);
+  g_bytes_unref (content);
+
+  content = g_bytes_new_static ("inspecting journals and starting and stopping services.", 55);
+  cockpit_web_response_queue (tc->response, content);
+  g_bytes_unref (content);
+
+  content = g_bytes_new_static ("", 0);
+  cockpit_web_response_queue (tc->response, content);
+  g_bytes_unref (content);
+
+  g_assert_cmpint (cockpit_web_response_get_state (tc->response), ==, COCKPIT_WEB_RESPONSE_QUEUING);
+  cockpit_web_response_complete (tc->response);
+
+  g_assert_cmpint (cockpit_web_response_get_state (tc->response), ==, COCKPIT_WEB_RESPONSE_COMPLETE);
+
+  resp = output_as_string (tc);
+  g_assert_cmpint (cockpit_web_response_get_state (tc->response), ==, COCKPIT_WEB_RESPONSE_SENT);
+
+  g_assert_cmpstr (resp, ==, "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"
+                   "26\r\nCockpit is perfect for new sysadmins, \r\n"
                    "37\r\ninspecting journals and starting and stopping services.\r\n0\r\n\r\n");
 }
 
@@ -534,6 +611,185 @@ test_pop_path_root (TestPlain *tc,
   g_object_unref (response);
 }
 
+static void
+test_gunzip_small (void)
+{
+  GError *error = NULL;
+  GMappedFile *file;
+  GBytes *compressed;
+  GBytes *bytes;
+
+  file = g_mapped_file_new (SRCDIR "/src/common/mock-content/test-file.txt.gz", FALSE, &error);
+  g_assert_no_error (error);
+
+  compressed = g_mapped_file_get_bytes (file);
+  g_mapped_file_unref (file);
+
+  bytes = cockpit_web_response_gunzip (compressed, &error);
+  g_assert_no_error (error);
+  g_bytes_unref (compressed);
+
+  cockpit_assert_bytes_eq (bytes, "A small test file\n", -1);
+  g_bytes_unref (bytes);
+}
+
+static void
+test_gunzip_large (void)
+{
+  GError *error = NULL;
+  GMappedFile *file;
+  GBytes *compressed;
+  GBytes *bytes;
+  gchar *checksum;
+
+  file = g_mapped_file_new (SRCDIR "/src/common/mock-content/large.min.js.gz", FALSE, &error);
+  g_assert_no_error (error);
+
+  compressed = g_mapped_file_get_bytes (file);
+  g_mapped_file_unref (file);
+
+  bytes = cockpit_web_response_gunzip (compressed, &error);
+  g_assert_no_error (error);
+  g_bytes_unref (compressed);
+
+  checksum = g_compute_checksum_for_bytes (G_CHECKSUM_MD5, bytes);
+  g_assert_cmpstr (checksum, ==, "5ca7582261c421482436dfdf3af9bffe");
+  g_free (checksum);
+
+  g_bytes_unref (bytes);
+}
+
+static void
+test_gunzip_invalid (void)
+{
+  GError *error = NULL;
+  GBytes *compressed;
+  GBytes *bytes;
+
+  compressed = g_bytes_new_static ("invalid", 7);
+
+  bytes = cockpit_web_response_gunzip (compressed, &error);
+  g_assert (bytes == NULL);
+  g_assert_error (error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA);
+  g_error_free (error);
+
+  g_bytes_unref (compressed);
+}
+
+static void
+test_negotiation_first (void)
+{
+  gchar *chosen = NULL;
+  GError *error = NULL;
+  GBytes *bytes;
+
+  bytes = cockpit_web_response_negotiation (SRCDIR "/src/common/mock-content/test-file.txt",
+                                            NULL, &chosen, &error);
+
+  cockpit_assert_bytes_eq (bytes, "A small test file\n", -1);
+  g_assert_no_error (error);
+  g_bytes_unref (bytes);
+
+  g_assert_cmpstr (chosen, ==, SRCDIR "/src/common/mock-content/test-file.txt");
+  g_free (chosen);
+}
+
+static void
+test_negotiation_last (void)
+{
+  gchar *chosen = NULL;
+  GError *error = NULL;
+  gchar *checksum;
+  GBytes *bytes;
+
+  bytes = cockpit_web_response_negotiation (SRCDIR "/src/common/mock-content/large.js",
+                                            NULL, &chosen, &error);
+
+  g_assert_no_error (error);
+  g_assert_cmpstr (chosen, ==, SRCDIR "/src/common/mock-content/large.min.js.gz");
+  g_free (chosen);
+
+  checksum = g_compute_checksum_for_bytes (G_CHECKSUM_MD5, bytes);
+  g_assert_cmpstr (checksum, ==, "e5284b625b7665fc04e082827de3436c");
+  g_free (checksum);
+
+  g_bytes_unref (bytes);
+}
+
+static void
+test_negotiation_prune (void)
+{
+  gchar *chosen = NULL;
+  GError *error = NULL;
+  GBytes *bytes;
+
+  bytes = cockpit_web_response_negotiation (SRCDIR "/src/common/mock-content/test-file.extra.extension.txt",
+                                            NULL, &chosen, &error);
+
+  cockpit_assert_bytes_eq (bytes, "A small test file\n", -1);
+  g_assert_no_error (error);
+  g_bytes_unref (bytes);
+
+  g_assert_cmpstr (chosen, ==, SRCDIR "/src/common/mock-content/test-file.txt");
+  g_free (chosen);
+}
+
+static void
+test_negotiation_with_listing (void)
+{
+  GHashTable *existing;
+  GError *error = NULL;
+  GBytes *bytes;
+
+  /* Lie and say that only the .gz file exists */
+  existing = g_hash_table_new (g_str_hash, g_str_equal);
+  g_hash_table_add (existing, SRCDIR "/src/common/mock-content/test-file.txt.gz");
+
+  bytes = cockpit_web_response_negotiation (SRCDIR "/src/common/mock-content/test-file.txt",
+                                            existing, NULL, &error);
+
+  cockpit_assert_bytes_eq (bytes, "\x1F\x8B\x08\x08N1\x03U\x00\x03test-file.txt\x00"
+                           "sT(\xCEM\xCC\xC9Q(I-.QH\xCB\xCCI\xE5\x02\x00>PjG\x12\x00\x00\x00", 52);
+  g_assert_no_error (error);
+  g_bytes_unref (bytes);
+
+  g_hash_table_unref (existing);
+}
+
+static void
+test_negotiation_notfound (void)
+{
+  gchar *chosen = NULL;
+  GError *error = NULL;
+  GBytes *bytes;
+
+  bytes = cockpit_web_response_negotiation (SRCDIR "/src/common/mock-content/non-existant",
+                                            NULL, &chosen, &error);
+
+  g_assert_no_error (error);
+  g_assert (bytes == NULL);
+
+  g_assert (chosen == NULL);
+}
+
+static void
+test_negotiation_failure (void)
+{
+  gchar *chosen = NULL;
+  GError *error = NULL;
+  GBytes *bytes;
+
+  bytes = cockpit_web_response_negotiation (SRCDIR "/src/common/mock-content/directory",
+                                            NULL, &chosen, &error);
+
+  g_assert (error != NULL);
+  g_error_free (error);
+
+  g_assert (bytes == NULL);
+
+  g_assert (chosen == NULL);
+}
+
 int
 main (int argc,
       char *argv[])
@@ -567,10 +823,14 @@ main (int argc,
               setup, test_file_breakout_non_existant, teardown);
   g_test_add ("/web-response/content-type", TestCase, &content_type_fixture,
               setup, test_content_type, teardown);
+  g_test_add ("/web-response/content-encoding", TestCase, NULL,
+              setup, test_content_encoding, teardown);
   g_test_add ("/web-response/stream", TestCase, NULL,
               setup, test_stream, teardown);
   g_test_add ("/web-response/chunked-transfer-encoding", TestCase, NULL,
               setup, test_chunked_transfer_encoding, teardown);
+  g_test_add ("/web-response/chunked-zero-length", TestCase, NULL,
+              setup, test_chunked_zero_length, teardown);
   g_test_add ("/web-response/abort", TestCase, NULL,
               setup, test_abort, teardown);
   g_test_add ("/web-response/connection-close", TestCase, &fixture_connection_close,
@@ -580,6 +840,17 @@ main (int argc,
               setup_plain, test_pop_path, teardown_plain);
   g_test_add ("/web-response/pop-path-root", TestPlain, NULL,
               setup_plain, test_pop_path_root, teardown_plain);
+
+  g_test_add_func ("/web-response/gunzip/small", test_gunzip_small);
+  g_test_add_func ("/web-response/gunzip/large", test_gunzip_large);
+  g_test_add_func ("/web-response/gunzip/invalid", test_gunzip_invalid);
+
+  g_test_add_func ("/web-response/negotiation/first", test_negotiation_first);
+  g_test_add_func ("/web-response/negotiation/last", test_negotiation_last);
+  g_test_add_func ("/web-response/negotiation/prune", test_negotiation_prune);
+  g_test_add_func ("/web-response/negotiation/with-listing", test_negotiation_with_listing);
+  g_test_add_func ("/web-response/negotiation/notfound", test_negotiation_notfound);
+  g_test_add_func ("/web-response/negotiation/failure", test_negotiation_failure);
 
   ret = g_test_run ();
 

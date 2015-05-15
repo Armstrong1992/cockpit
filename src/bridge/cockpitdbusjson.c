@@ -1488,18 +1488,21 @@ handle_dbus_add_match (CockpitDBusJson *self,
                               path_namespace ? TRUE : FALSE,
                               interface, signal, arg0))
     {
-      match = build_dbus_match (self, path, path_namespace, interface, signal, arg0);
-      g_dbus_connection_call (self->connection,
-                              "org.freedesktop.DBus",
-                              "/org/freedesktop/DBus",
-                              "org.freedesktop.DBus",
-                              "AddMatch",
-                              g_variant_new ("(s)", match),
-                              NULL, G_DBUS_CALL_FLAGS_NO_AUTO_START, -1,
-                              self->cancellable,
-                              on_add_match_ready,
-                              g_object_ref (self));
-      g_free (match);
+      if (self->name)
+        {
+          match = build_dbus_match (self, path, path_namespace, interface, signal, arg0);
+          g_dbus_connection_call (self->connection,
+                                  "org.freedesktop.DBus",
+                                  "/org/freedesktop/DBus",
+                                  "org.freedesktop.DBus",
+                                  "AddMatch",
+                                  g_variant_new ("(s)", match),
+                                  NULL, G_DBUS_CALL_FLAGS_NO_AUTO_START, -1,
+                                  self->cancellable,
+                                  on_add_match_ready,
+                                  g_object_ref (self));
+          g_free (match);
+        }
     }
 }
 
@@ -1553,18 +1556,21 @@ handle_dbus_remove_match (CockpitDBusJson *self,
                                  path_namespace ? TRUE : FALSE,
                                  interface, signal, arg0))
     {
-      match = build_dbus_match (self, path, path_namespace, interface, signal, arg0);
-      g_dbus_connection_call (self->connection,
-                              "org.freedesktop.DBus",
-                              "/org/freedesktop/DBus",
-                              "org.freedesktop.DBus",
-                              "RemoveMatch",
-                              g_variant_new ("(s)", match),
-                              NULL, G_DBUS_CALL_FLAGS_NO_AUTO_START, -1,
-                              NULL, /* don't cancel removes */
-                              on_remove_match_ready,
-                              g_object_ref (self));
-      g_free (match);
+      if (self->name)
+        {
+          match = build_dbus_match (self, path, path_namespace, interface, signal, arg0);
+          g_dbus_connection_call (self->connection,
+                                  "org.freedesktop.DBus",
+                                  "/org/freedesktop/DBus",
+                                  "org.freedesktop.DBus",
+                                  "RemoveMatch",
+                                  g_variant_new ("(s)", match),
+                                  NULL, G_DBUS_CALL_FLAGS_NO_AUTO_START, -1,
+                                  NULL, /* don't cancel removes */
+                                  on_remove_match_ready,
+                                  g_object_ref (self));
+          g_free (match);
+        }
     }
 }
 
@@ -1957,14 +1963,14 @@ cockpit_dbus_json_prepare (CockpitChannel *channel)
           goto out;
         }
 
-      self->name = NULL;
-
       self->connection = cockpit_dbus_internal_client ();
       if (self->connection == NULL)
         {
           problem = "internal-error";
           goto out;
         }
+
+      self->name = cockpit_dbus_internal_name ();
 
       subscribe_and_cache (self);
       cockpit_channel_ready (channel);

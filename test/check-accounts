@@ -35,9 +35,10 @@ class TestAccounts(MachineCase):
         # Set a real name
         b.go("account?id=anton")
         b.enter_page("account")
+        b.wait_text("#account-user-name", "anton")
         b.set_val('#account-real-name', "Anton Arbitrary")
-        b.wait_dbus_prop('com.redhat.Cockpit.Account', 'RealName', "Anton Arbitrary")
-        check("Anton Arbitrary" in m.execute("grep anton /etc/passwd"))
+        b.wait_not_attr('#account-real-name', 'data-dirty', 'true')
+        self.assertIn("Anton Arbitrary", m.execute("grep anton /etc/passwd"))
 
         # Delete it
         b.click('#account-delete')
@@ -52,8 +53,8 @@ class TestAccounts(MachineCase):
         b.wait_popup('accounts-create-dialog')
         b.set_val('#accounts-create-user-name', "berta")
         b.set_val('#accounts-create-real-name', "Berta Bestimmt")
-        b.set_val('#accounts-create-pw1', "foobar")
-        b.set_val('#accounts-create-pw2', "foobar")
+        b.set_val('#accounts-create-pw1', "fooB3r123")
+        b.set_val('#accounts-create-pw2', "fooB3r123")
         b.click('#accounts-create-create')
         b.wait_popdown('accounts-create-dialog')
         b.wait_in_text('#accounts-list', "Berta Bestimmt")
@@ -67,8 +68,8 @@ class TestAccounts(MachineCase):
         b.wait_popup('accounts-create-dialog')
         b.set_val('#accounts-create-user-name', "jussi")
         b.set_val('#accounts-create-real-name', "Jussi Junior")
-        b.set_val('#accounts-create-pw1', "foobar")
-        b.set_val('#accounts-create-pw2', "foobar")
+        b.set_val('#accounts-create-pw1', "fooB3r123")
+        b.set_val('#accounts-create-pw2', "fooB3r123")
         b.set_val('#accounts-create-locked', "yes")
         b.click('#accounts-create-create')
         b.wait_popdown('accounts-create-dialog')
@@ -77,12 +78,44 @@ class TestAccounts(MachineCase):
         # Unlock it and make it an admin
         b.go("account?id=jussi")
         b.enter_page("account")
+        b.wait_text("#account-user-name", "jussi")
         b.set_val('#accounts-create-locked', "no")
         b.click('#account-change-roles')
         b.wait_popup('account-change-roles-dialog')
-        b.set_checked('#account-role-checkbox-wheel', True)
+        b.set_checked('#account-role-checkbox-10', True)
         b.click('#account-change-roles-apply')
         b.wait_popdown('account-change-roles-dialog')
-        check("jussi" in m.execute("grep wheel /etc/group"))
+        self.assertIn("jussi", m.execute("grep wheel /etc/group"))
+
+        # Change the password of this account
+        b.go("account?id=jussi")
+        b.enter_page("account")
+        b.wait_text("#account-user-name", "jussi")
+        b.click('#account-set-password')
+        b.wait_popup('account-set-password-dialog')
+
+        # Something invalid
+        b.set_val("#account-set-password-pw1", 'a')
+        b.set_val("#account-set-password-pw2", 'a')
+        b.click('#account-set-password-apply')
+        b.wait_present(".check-passwords.has-error")
+        self.assertEqual(b.text(".check-passwords.has-error .dialog-error.help-block"), "Password is not acceptable")
+
+        # Now set to something valid
+        b.set_val("#account-set-password-pw1", 'ö5 foobar')
+        b.set_val("#account-set-password-pw2", 'ö5 foobar')
+        b.click('#account-set-password-apply')
+        b.wait_popdown('account-set-password-dialog')
+
+        # Logout and login with the new password
+        b.logout()
+        self.allow_restart_journal_messages()
+        b.open("accounts", href="/users/local")
+        b.wait_visible("#login")
+        b.set_val("#login-user-input", "jussi")
+        b.set_val("#login-password-input", 'ö5 foobar')
+        b.click('#login-button')
+        b.expect_reload()
+        b.wait_present('#content')
 
 test_main()

@@ -22,18 +22,18 @@
 #include "cockpitdbusinternal.h"
 #include "cockpitdbusjson.h"
 #include "cockpitechochannel.h"
-#include "cockpitfsdir.h"
+#include "cockpitfslist.h"
 #include "cockpitfsread.h"
 #include "cockpitfswatch.h"
-#include "cockpitfswrite.h"
+#include "cockpitfsreplace.h"
 #include "cockpithttpstream.h"
 #include "cockpitinteracttransport.h"
 #include "cockpitnullchannel.h"
 #include "cockpitpackages.h"
-#include "cockpitpcpmetrics.h"
+#include "cockpitpipechannel.h"
+#include "cockpitinternalmetrics.h"
 #include "cockpitpolkitagent.h"
 #include "cockpitportal.h"
-#include "cockpitstream.h"
 
 #include "deprecated/cockpitdbusjson1.h"
 
@@ -72,12 +72,15 @@ static void
 process_init (CockpitTransport *transport,
               JsonObject *options)
 {
-  gint64 version;
+  gint64 version = -1;
 
   if (!cockpit_json_get_int (options, "version", -1, &version))
-    version = -1;
+    {
+      g_warning ("invalid version field in init message");
+      cockpit_transport_close (transport, "protocol-error");
+    }
 
-  if (version == 0)
+  if (version == 1)
     {
       g_debug ("received init message");
       init_received = TRUE;
@@ -85,9 +88,27 @@ process_init (CockpitTransport *transport,
   else
     {
       g_message ("unsupported version of cockpit protocol: %" G_GINT64_FORMAT, version);
-      cockpit_transport_close (transport, "protocol-error");
+      cockpit_transport_close (transport, "not-supported");
     }
 }
+
+static struct {
+  const gchar *name;
+  GType (* function) (void);
+} payload_types[] = {
+  { "dbus-json1", cockpit_dbus_json1_get_type },
+  { "dbus-json3", cockpit_dbus_json_get_type },
+  { "http-stream1", cockpit_http_stream_get_type },
+  { "stream", cockpit_pipe_channel_get_type },
+  { "fsread1", cockpit_fsread_get_type },
+  { "fsreplace1", cockpit_fsreplace_get_type },
+  { "fswatch1", cockpit_fswatch_get_type },
+  { "fslist1", cockpit_fslist_get_type },
+  { "null", cockpit_null_channel_get_type },
+  { "echo", cockpit_echo_channel_get_type },
+  { "metrics1", cockpit_internal_metrics_get_type },
+  { NULL },
+};
 
 static void
 process_open (CockpitTransport *transport,
@@ -97,6 +118,8 @@ process_open (CockpitTransport *transport,
   CockpitChannel *channel;
   GType channel_type;
   const gchar *payload;
+  gchar **capabilities = NULL;
+  gint i;
 
   if (!channel_id)
     {
@@ -108,38 +131,39 @@ process_open (CockpitTransport *transport,
       g_warning ("Caller tried to reuse a channel that's already in use");
       cockpit_transport_close (transport, "protocol-error");
     }
+
+  /*
+   * No capabilities are supported yet. When the first one arrives
+   * we'll add code to process it.
+   */
+
+  else if (!cockpit_json_get_strv (options, "capabilities", NULL, &capabilities))
+    {
+      g_message ("got invalid capabilities field in init message");
+      cockpit_transport_close (transport, "protocol-error");
+    }
+  else if (capabilities && capabilities[0])
+    {
+      g_message ("unsupported capability required: %s", capabilities[0]);
+      cockpit_transport_close (transport, "not-supported");
+    }
+
   else
     {
       if (!cockpit_json_get_string (options, "payload", NULL, &payload))
         payload = NULL;
 
-      /* TODO: We need to migrate away from dbus-json1 */
-      if (g_strcmp0 (payload, "dbus-json1") == 0)
-        channel_type = COCKPIT_TYPE_DBUS_JSON1;
-      else if (g_strcmp0 (payload, "dbus-json3") == 0)
-        channel_type = COCKPIT_TYPE_DBUS_JSON;
-      else if (g_strcmp0 (payload, "http-stream1") == 0)
-        channel_type = COCKPIT_TYPE_HTTP_STREAM;
-      else if (g_strcmp0 (payload, "stream") == 0)
-        channel_type = COCKPIT_TYPE_STREAM;
-      else if (g_strcmp0 (payload, "fsread1") == 0)
-        channel_type = COCKPIT_TYPE_FSREAD;
-      else if (g_strcmp0 (payload, "fswrite1") == 0)
-        channel_type = COCKPIT_TYPE_FSWRITE;
-      else if (g_strcmp0 (payload, "fswatch1") == 0)
-        channel_type = COCKPIT_TYPE_FSWATCH;
-      else if (g_strcmp0 (payload, "fsdir1") == 0)
-        channel_type = COCKPIT_TYPE_FSDIR;
-      else if (g_strcmp0 (payload, "null") == 0)
-        channel_type = COCKPIT_TYPE_NULL_CHANNEL;
-      else if (g_strcmp0 (payload, "echo") == 0)
-        channel_type = COCKPIT_TYPE_ECHO_CHANNEL;
-#if 0
-      else if (g_strcmp0 (payload, "metrics1") == 0)
-        channel_type = COCKPIT_TYPE_INTERNAL_METRICS;
-#endif
-      else
-        channel_type = COCKPIT_TYPE_CHANNEL;
+      /* This will close with "not-supported" */
+      channel_type = COCKPIT_TYPE_CHANNEL;
+
+      for (i = 0; payload_types[i].name != NULL; i++)
+        {
+          if (g_strcmp0 (payload, payload_types[i].name) == 0)
+            {
+              channel_type = payload_types[i].function();
+              break;
+            }
+        }
 
       channel = g_object_new (channel_type,
                               "transport", transport,
@@ -150,6 +174,8 @@ process_open (CockpitTransport *transport,
       g_hash_table_insert (channels, g_strdup (channel_id), channel);
       g_signal_connect (channel, "closed", G_CALLBACK (on_channel_closed), NULL);
     }
+
+  g_free (capabilities);
 }
 
 static gboolean
@@ -212,16 +238,22 @@ static void
 send_init_command (CockpitTransport *transport)
 {
   const gchar *checksum;
+  const gchar *name;
   JsonObject *object;
   GBytes *bytes;
 
   object = json_object_new ();
   json_object_set_string_member (object, "command", "init");
-  json_object_set_int_member (object, "version", 0);
+  json_object_set_int_member (object, "version", 1);
 
   checksum = cockpit_packages_get_checksum (packages);
   if (checksum)
     json_object_set_string_member (object, "checksum", checksum);
+
+  /* Happens when we're in --interact mode */
+  name = cockpit_dbus_internal_name ();
+  if (name)
+    json_object_set_string_member (object, "bridge-dbus-name", name);
 
   bytes = cockpit_json_write_bytes (object);
   cockpit_transport_send (transport, NULL, bytes);
@@ -393,7 +425,7 @@ run_bridge (const gchar *interactive)
   int outfd;
   uid_t uid;
 
-  cockpit_set_journal_logging (!isatty (2));
+  cockpit_set_journal_logging (G_LOG_DOMAIN, !isatty (2));
 
   /* Always set environment variables early */
   uid = geteuid();
@@ -432,10 +464,13 @@ run_bridge (const gchar *interactive)
     daemon_pid = start_dbus_daemon ();
 
   packages = cockpit_packages_new ();
-  cockpit_dbus_internal_startup ();
+  cockpit_dbus_internal_startup (interactive != NULL);
 
   if (interactive)
     {
+      /* Allow skipping the init message when interactive */
+      init_received = TRUE;
+
       transport = cockpit_interact_transport_new (0, outfd, interactive);
     }
   else
@@ -454,6 +489,7 @@ run_bridge (const gchar *interactive)
 
   cockpit_dbus_time_startup ();
   cockpit_dbus_user_startup (pwd);
+  cockpit_dbus_setup_startup ();
 
   g_free (pwd);
   pwd = NULL;
@@ -493,6 +529,39 @@ run_bridge (const gchar *interactive)
   return 0;
 }
 
+static void
+print_version (void)
+{
+  gint i, offset, len;
+
+  g_print ("Version: %s\n", PACKAGE_VERSION);
+  g_print ("Protocol: 1\n");
+
+  g_print ("Payloads: ");
+  offset = 10;
+  for (i = 0; payload_types[i].name != NULL; i++)
+    {
+      len = strlen (payload_types[i].name);
+      if (offset + len > 70)
+        {
+          g_print ("\n");
+          offset = 0;
+        }
+
+      if (offset == 0)
+        {
+          g_print ("    ");
+          offset = 4;
+        };
+
+      g_print ("%s ", payload_types[i].name);
+      offset += len + 1;
+    }
+  g_print ("\n");
+
+  g_print ("Authorization: crypt1\n");
+}
+
 int
 main (int argc,
       char **argv)
@@ -502,11 +571,13 @@ main (int argc,
   int ret;
 
   static gboolean opt_packages = FALSE;
+  static gboolean opt_version = FALSE;
   static gchar *opt_interactive = NULL;
 
   static GOptionEntry entries[] = {
-    { "packages", 0, 0, G_OPTION_ARG_NONE, &opt_packages, "Show Cockpit package information", NULL },
     { "interact", 0, 0, G_OPTION_ARG_STRING, &opt_interactive, "Interact with the raw protocol", "boundary" },
+    { "packages", 0, 0, G_OPTION_ARG_NONE, &opt_packages, "Show Cockpit package information", NULL },
+    { "version", 0, 0, G_OPTION_ARG_NONE, &opt_version, "Show Cockpit version information", NULL },
     { NULL }
   };
 
@@ -543,6 +614,11 @@ main (int argc,
   if (opt_packages)
     {
       cockpit_packages_dump ();
+      return 0;
+    }
+  else if (opt_version)
+    {
+      print_version ();
       return 0;
     }
 

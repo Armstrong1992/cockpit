@@ -34,15 +34,20 @@
    last user.
 */
 
-/* global jQuery   */
-/* global cockpit  */
+var phantom_checkpoint = phantom_checkpoint || function () { };
 
-/* global phantom_checkpoint */
+define([
+    "jquery",
+    "base1/cockpit",
+    "shell/shell",
+    "manifests",
+    "shell/cockpit-util",
+    "shell/controls"
+], function($, cockpit, shell, manifests) {
+"use strict";
 
-var shell = shell || { };
-var modules = modules ||  { };
-
-(function($, cockpit, shell, modules) {
+var _ = cockpit.gettext;
+var C_ = cockpit.gettext;
 
 shell.pages = [];
 shell.dialogs = [];
@@ -51,40 +56,13 @@ var visited_dialogs = {};
 
 shell.dbus = dbus;
 
-/* Initialize cockpit when page is loaded and modules available */
-var loaded = false;
-modules.loaded = false;
-
-function maybe_init() {
-    if (loaded && modules.loaded)
-        init();
-}
-
-/* HACK: Until all of the shell is loaded via AMD */
-require([
-    "system/server",
-    "manifests"
-], function(server, manifests) {
-    modules.server = server;
-    if (manifests["docker"]) {
-        require([ "docker/docker" ], function (docker) {
-            modules.docker = docker;
-            modules.loaded = true;
-            maybe_init();
-        });
-    } else {
-        modules.loaded = true;
-        maybe_init();
-    }
-});
-
-function init() {
+shell.init = function init() {
     $('.dropdown-toggle').dropdown();
     content_init();
     content_show();
-}
+};
 
-require(["base1/po"], function(po) {
+require(["translated!base1/po"], function(po) {
     cockpit.locale(po);
 });
 
@@ -139,18 +117,6 @@ function content_init() {
         dialog_leave($(this).attr("id"));
     });
 
-    /* For legacy pages
-     */
-    $('#content-navbar a[data-page-id]').click(function () {
-        cockpit.location.go([ cockpit.location.path[0], $(this).attr('data-page-id') ]);
-    });
-
-    /* For statically registered components
-     */
-    $('#content-navbar a[data-task-id]').click(function () {
-        cockpit.location.go([ cockpit.location.path[0], $(this).attr('data-task-id') ]);
-    });
-
     $(cockpit).on('locationchanged', function () {
         if (current_visible_dialog)
             $('#' + current_visible_dialog).modal('hide');
@@ -163,8 +129,6 @@ function content_init() {
 
     shell.content_refresh();
     $('.selectpicker').selectpicker();
-
-    hosts_init();
 }
 
 function content_show() {
@@ -187,265 +151,7 @@ function recalculate_layout() {
     $(cockpit).trigger('resize');
 }
 
-/* Information for each host, keyed by address.  hosts[addr] is an
- * object with at least these fields:
- *
- * - display_name
- * - avatar
- * - color
- * - state
- * - problem
- * - cockpitd
- * - compare(other_host_object)
- * - set_display_name(name)
- * - set_avatar(avatar)
- * - set_color(color)
- * - reconnect()
- * - show_problem_dialog()
- * - remove()
- *
- * $(shell.hosts).on("added removed changed", function (addr) { });
- */
-shell.hosts = { };
-
-shell.host_setup = function host_setup() {
-    $('#dashboard_setup_server_dialog').modal('show');
-};
-
-shell.host_colors = [
-    "#0099d3",
-    "#67d300",
-    "#d39e00",
-    "#d3007c",
-    "#00d39f",
-    "#00d1d3",
-    "#00618a",
-    "#4c8a00",
-    "#8a6600",
-    "#9b005b",
-    "#008a55",
-    "#008a8a",
-    "#00b9ff",
-    "#7dff00",
-    "#ffbe00",
-    "#ff0096",
-    "#00ffc0",
-    "#00fdff",
-    "#023448",
-    "#264802",
-    "#483602",
-    "#590034",
-    "#024830",
-    "#024848"
-];
-
 shell.default_permission = cockpit.permission({ group: "wheel" });
-
-function pick_unused_host_color() {
-    function in_use(color) {
-        var norm = $.color.parse(color).toString();
-        for (var a in shell.hosts) {
-            var h = shell.hosts[a];
-            if (h.color && $.color.parse(h.color).toString() == norm)
-                return true;
-        }
-        return false;
-    }
-
-    for (var i = 0; i < shell.host_colors.length; i++) {
-        if (!in_use(shell.host_colors[i]))
-            return shell.host_colors[i];
-    }
-    return "gray";
-}
-
-function update_servers_privileged() {
-    shell.update_privileged_ui(
-        shell.default_permission, ".servers-privileged",
-        cockpit.format(
-            _("The user <b>$0</b> is not permitted to add servers"),
-            cockpit.user.name)
-    );
-}
-
-function hosts_init() {
-
-    var host_info = shell.hosts;
-    var host_proxies;
-
-    function update() {
-        var want = { };
-        for (var path in host_proxies) {
-            var h = host_proxies[path];
-            if (shell.find_in_array(h.Tags, "dashboard")) {
-                want[h.Address] = h;
-                if (!host_info[h.Address]) {
-                    add_host(h.Address, h);
-                    $(shell.hosts).trigger('added', [ h.Address ]);
-                }
-            }
-        }
-        for (var addr in host_info) {
-            if (!want[addr]) {
-                host_info[addr]._removed();
-                delete host_info[addr];
-                $(shell.hosts).trigger('removed', [ addr ]);
-            }
-        }
-    }
-
-    function add_host(addr, proxy) {
-        var client = cockpit.dbus("com.redhat.Cockpit", { host: addr, bus: "session", track: true });
-        var manager = client.proxy("com.redhat.Cockpit.Manager",
-                                   "/com/redhat/Cockpit/Manager");
-
-        var info = { display_name: null,
-                     avatar: null,
-                     color: null,
-                     state: "connecting",
-                     cockpitd: client,
-                     address: addr,
-
-                     compare: compare,
-                     set_display_name: set_display_name,
-                     set_avatar: set_avatar,
-                     set_color: set_color,
-                     reconnect: reconnect,
-                     show_problem_dialog: show_problem_dialog,
-                     remove: remove,
-
-                     _removed: _removed
-                   };
-
-        function compare(other) {
-            return info.display_name.localeCompare(other.display_name);
-        }
-
-        function remove() {
-            proxy.RemoveTag("dashboard").
-                fail(function (error) {
-                    cockpit.show_unexpected_error(error);
-                });
-        }
-
-        function update_hostname() {
-            var name;
-            if (manager.valid)
-                name = shell.util.hostname_for_display(manager);
-            else if (proxy.Name)
-                name = proxy.Name;
-            else
-                name = addr;
-            if (name != info.display_name) {
-                info.display_name = name;
-                update_global_nav();
-            }
-        }
-
-        function update_from_proxy() {
-            if (proxy.Color)
-                info.color = proxy.Color;
-            else if (info.color === null) {
-                info.color = pick_unused_host_color();
-                proxy.SetColor(info.color).
-                    fail(function (error) {
-                        console.warn(error);
-                    });
-            }
-
-            info.avatar = proxy.Avatar;
-            update_hostname();
-        }
-
-        function update_from_manager() {
-            var name = shell.util.hostname_for_display(manager);
-            if (name != proxy.Name)
-                proxy.SetName(name);
-            update_hostname();
-        }
-
-        function set_display_name(name) {
-            if (manager.valid)
-                return manager.SetHostname(name, manager.StaticHostname, {});
-            else
-                return $.Deferred().reject("not connected").promise();
-        }
-
-        function set_avatar(data) {
-            return proxy.SetAvatar(data);
-        }
-
-        function set_color(color) {
-            return proxy.SetColor(color);
-        }
-
-        function reconnect() {
-            _removed();
-            delete host_info[addr];
-            $(shell.hosts).trigger('removed', [ addr ]);
-            add_host(addr, proxy);
-            $(shell.hosts).trigger('added', [ addr ]);
-        }
-
-        function show_problem_dialog() {
-            $('#reconnect-dialog-summary').text(
-                cockpit.format(_("Couldn't establish connection to $0."), info.display_name));
-            $('#reconnect-dialog-problem').text(cockpit.message(info.problem));
-            $('#reconnect-dialog-reconnect').off('click');
-            $('#reconnect-dialog-reconnect').on('click', function () {
-                $('#reconnect-dialog').modal('hide');
-                reconnect();
-            });
-            $('#reconnect-dialog').modal('show');
-        }
-
-        function _removed() {
-            $(manager).off('.hosts');
-            client.close();
-        }
-
-        host_info[addr] = info;
-
-        $(client).on("close", function (event, problem) {
-            info.state = "failed";
-            info.problem = problem;
-            $(shell.hosts).trigger('changed', [ addr ]);
-        });
-
-        $(proxy).on('changed', function (event, props) {
-            if ("Color" in props || "Avatar" in props || "Name" in props) {
-                update_from_proxy();
-                $(shell.hosts).trigger('changed', [ addr ]);
-            }
-        });
-        update_from_proxy();
-
-        manager.wait(function () {
-            if (manager.valid) {
-                info.state = "connected";
-                $(manager).on('changed.hosts', function (event, props) {
-                    if ("PrettyHostname" in props || "StaticHostname" in props) {
-                        update_from_manager();
-                        $(shell.hosts).trigger('changed', [ addr ]);
-                    }
-                });
-                update_from_manager();
-            }
-        });
-    }
-
-    var cockpitd = cockpit.dbus("com.redhat.Cockpit", { host: "localhost", bus: "session", track: true });
-    host_proxies = cockpitd.proxies("com.redhat.Cockpit.Machine",
-                                    "/com/redhat/Cockpit/Machines");
-    host_proxies.wait(function () {
-        $(host_proxies).on('added removed changed', update);
-        update();
-    });
-
-
-    $(shell.default_permission).on("changed", update_servers_privileged);
-    update_servers_privileged();
-}
 
 function update_global_nav() {
     var page_title = null;
@@ -469,36 +175,10 @@ function update_global_nav() {
     recalculate_layout();
 }
 
-/* A map from path prefixes such as [ "tools" "terminal" ] to
- * component description objects.  Such an object has the following
- * fields:
- *
- * - pkg
- * - entry
- *
- * The package to load and the file of that package to use as the
- * entry point.
- */
-var components = { };
-
-/* A map from host-plus-path-prefixes to page <iframe> objects.
- */
-var page_iframes = { };
-
 /* A map from id to the page object, for legacy pages that
  * have been visited already.
  */
 var visited_legacy_pages = { };
-
-function register_component(prefix, package_name, entry) {
-    var key = JSON.stringify(prefix);
-    components[key] = { pkg: package_name, entry: entry };
-}
-
-function register_tool(ident, label) {
-    var link = $("<a>").attr("data-task-id", ident).text(label);
-    $("<li>").append(link).appendTo("#tools-menu");
-}
 
 /* HACK: Mozilla will unescape 'location.hash' before returning
  * it, which is broken.
@@ -596,7 +276,9 @@ function dialog_enter(id) {
     if (dialog) {
         if (first_visit && dialog.setup)
             dialog.setup();
-        dialog.enter();
+        if (!dialog.entered)
+            dialog.enter();
+        dialog.entered = true;
     }
     visited_dialogs[id] = true;
     phantom_checkpoint ();
@@ -605,7 +287,9 @@ function dialog_enter(id) {
 function dialog_leave(id) {
     var dialog = dialog_from_id(id);
     if (dialog) {
-        dialog.leave();
+        if (dialog.entered)
+            dialog.leave();
+        dialog.entered = false;
     }
     phantom_checkpoint ();
 }
@@ -682,17 +366,4 @@ shell.confirm = function confirm(title, body, action_text) {
     return deferred.promise();
 };
 
-/* Run when jQuery thinks page is loaded */
-$(function() {
-    loaded = true;
-    maybe_init();
 });
-
-})(jQuery, cockpit, shell, modules);
-
-function N_(str) {
-    return str;
-}
-
-var _ = cockpit.gettext;
-var C_ = cockpit.gettext;

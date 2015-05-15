@@ -3,11 +3,19 @@
 This directory contains automated tests for Cockpit, and the support
 files for them.
 
+  **********************************************************************
+  *                                                                    *
+  *  This testsuite is being phased out.  Don't do any new work here.  *
+  *  The new one is in ../test-avocado.                                *
+  *                                                                    *
+  **********************************************************************
+
 To run the tests, you need to install the following packages on
 Fedora:
 
-  # yum install trickle nbd-server npm python-libguestfs qemu mock qemu-kvm python \
-         curl libvirt-client libvirtd qemu-nbd fakeroot glibc-static openssl
+  # yum install trickle npm python-libguestfs qemu mock qemu-kvm python \
+         curl libvirt-client openssl rpmdevtools \
+         rpm-build krb5-workstation python-lxml
 
 Testing requires phantomjs globally on the system, not just inside the cockpit package.
 
@@ -43,8 +51,14 @@ check-*,             for running selected tests.
 
 You can set these environment variables to configure the test suite:
 
-  TEST_OS    The OS to run the tests in.  Currently, "fedora-20" and
-             "fedora-21" are supported, with "fedora-20" as the default.
+  TEST_OS    The OS to run the tests in.  Currently, "fedora-21",
+             "fedora-22" and "rhel-7" are supported, with "fedora-22"
+             as the default.
+             Note on "rhel-7": The installation routine expects subscription
+             credentials to be present on the host:
+             ~/.rhel/login and ~/.rhel/pass, which will be copied to the guest.
+             Without these, the system can't be registered and the runtime
+             dependencies of cockpit won't be installed.
 
   TEST_ARCH  The machine architecture to use.  Currently, the default
              and only supported value is "x86_64".

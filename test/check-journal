@@ -37,7 +37,7 @@ class TestJournal(MachineCase):
               lines.push($('.journal-end').text());
               $('.journal-lines').children().each(function (i, e) {
                 var $e = $(e);
-                if ($e.is('.cockpit-loghead'))
+                if ($e.is('.panel-heading'))
                   lines.push ($e.text());
                 else {
                   var c = $e.children();
@@ -78,7 +78,7 @@ Description=Slowly log 10 identical lines
 ExecStart=/bin/sh -c 'for s in $(seq 10); do echo SLOW; sleep 0.1; done; sleep 10'
 """)
 
-        m.execute("systemctl stop chronyd; date 010112002050; hwclock -w")
+        m.execute("systemctl stop chronyd; systemctl disable chronyd; date 010112002050; hwclock -w")
 
         self.login_and_go("/system/log")
         inject_extras()
@@ -178,10 +178,16 @@ ExecStart=/bin/sh -c 'for s in $(seq 10); do echo SLOW; sleep 0.1; done; sleep 1
         b.go("/?prio=*&start=oldest&service=slow10.service")
         wait_slow10()
 
-        m.execute("logger -p3 --tag check-journal BEFORE BOOT");
+        if "208" in m.execute("journalctl --version"):
+            # HACK - Old versions of journalctl get the rest wrong.
+            # https://bugzilla.redhat.com/show_bug.cgi?id=1211972
+            return
+
+        # insert messages as errors because we know these will be shown by default
+        m.execute("logger -p user.err --tag check-journal BEFORE BOOT");
         m.spawn("sleep 0.1 && reboot", "reboot")
         m.wait_boot()
-        m.execute("logger -p3 --tag check-journal AFTER BOOT");
+        m.execute("logger -p user.err --tag check-journal AFTER BOOT");
 
         self.start_cockpit()
         b.switch_to_top()

@@ -26,10 +26,13 @@
 
 #include "websocket/websocket.h"
 
+#include <sys/socket.h>
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+
 #include <systemd/sd-daemon.h>
 
 guint cockpit_webserver_request_timeout = 30;
@@ -662,6 +665,80 @@ cockpit_web_server_parse_languages (GHashTable *headers,
   g_ptr_array_free (langs, TRUE);
   return (gchar **)g_ptr_array_free (ret, FALSE);
 }
+
+/**
+ * cockpit_web_server_parse_encoding:
+ * @headers: a table of HTTP headers
+ * @encoding: an encoding to check
+ *
+ * Check if the @headers allow for the @encoding. The Accept-Encoding
+ * header is consulted along with its qvalues, and defaults.
+ *
+ * Returns: whether the encoding is acceptable
+ */
+gboolean
+cockpit_web_server_parse_encoding (GHashTable *headers,
+                                   const gchar *encoding)
+{
+  gboolean ret = FALSE;
+  const gchar *header;
+  gboolean any = FALSE;
+  gchar *accept;
+  double qvalue;
+  gchar *copy;
+  gchar *next;
+  gchar *pos;
+
+  header = g_hash_table_lookup (headers, "Accept-Encoding");
+  if (!header)
+    return TRUE;
+
+  accept = copy = g_strdup (header);
+
+  while (accept)
+    {
+      next = strchr (accept, ',');
+      if (next)
+        {
+          *next = '\0';
+          next++;
+        }
+
+      qvalue = 1;
+
+      pos = strchr (accept, ';');
+      if (pos)
+        {
+          *pos = '\0';
+          if (strncmp (pos + 1, "q=", 2) == 0)
+            {
+              qvalue = g_ascii_strtod (pos + 3, NULL);
+              if (qvalue < 0)
+                qvalue = 0;
+            }
+        }
+
+      accept = g_strstrip (accept);
+      if (accept[0])
+        any = TRUE;
+
+      if (g_ascii_strcasecmp (encoding, accept) == 0)
+        {
+          ret = qvalue > 0;
+          break;
+        }
+
+      accept = next;
+    }
+
+  /* Empty header, anything is acceptable */
+  if (!ret && !any)
+    ret = TRUE;
+
+  g_free (copy);
+  return ret;
+}
+
 /* ---------------------------------------------------------------------------------------------------- */
 
 typedef struct {
@@ -1184,6 +1261,19 @@ cockpit_web_server_initable_init (GInitable *initable,
         {
           GSocket *s = NULL;
           gboolean b;
+          int type;
+          socklen_t l = sizeof (type);
+
+          /*
+           * HACK: Workaround g_error() happy code in GSocket
+           * https://bugzilla.gnome.org/show_bug.cgi?id=746339
+           */
+          if (getsockopt (fd, SOL_SOCKET, SO_TYPE, &type, &l) < 0)
+            {
+              g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
+                           "invalid socket passed via systemd activation: %d: %s", fd, g_strerror (errno));
+              goto out;
+            }
 
           s = g_socket_new_from_fd (fd, error);
           if (s == NULL)

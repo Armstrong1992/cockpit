@@ -17,13 +17,14 @@
  * along with Cockpit; If not, see <http://www.gnu.org/licenses/>.
  */
 
-/* global jQuery   */
-/* global cockpit  */
-/* global _        */
-/* global C_       */
+define([
+    "jquery",
+    "base1/cockpit",
+    "shell/shell"
+], function($, cockpit, shell) {
 
-var shell = shell || { };
-(function($, shell) {
+var _ = cockpit.gettext;
+var C_ = cockpit.gettext;
 
 /* A thin abstraction over flot and metrics channels.  It mostly
  * shields you from hairy array acrobatics and having to know when it
@@ -70,6 +71,11 @@ var shell = shell || { };
  * flot.setData() and flot.draw() and can be used to adjust the axes
  * limits, for example.  It is called with the flot object as its only
  * parameter.
+ *
+ * - options = plot.get_options()
+ *
+ * Get the global flot options.  You can modify the object and then
+ * pass it to set_options.  Don't forget to refresh the plot.
  *
  * - plot.reset(x_range, [x_stop])
  *
@@ -158,6 +164,13 @@ shell.plot = function plot(element, x_range_seconds, x_stop_seconds) {
     }
 
     function start_walking() {
+        /* Don't overflow 32 signed bits with the interval.  This
+         * means that plots that would make about one step every month
+         * don't walk at all, but I guess that is ok.
+         */
+        if (interval > 2000000000)
+            return;
+
         if (!walk_timer)
             walk_timer = window.setInterval(function () {
                 now += interval;
@@ -174,6 +187,9 @@ shell.plot = function plot(element, x_range_seconds, x_stop_seconds) {
     }
 
     function reset(x_range_seconds, x_stop_seconds) {
+        if (flot)
+            flot.clearSelection(true);
+
         now = (new Date()).getTime();
 
         if (x_stop_seconds !== undefined)
@@ -216,6 +232,10 @@ shell.plot = function plot(element, x_range_seconds, x_stop_seconds) {
     function set_options(opts) {
         options = opts;
         flot = null;
+    }
+
+    function get_options() {
+        return options;
     }
 
     function add_metrics_sum_series(desc, opts) {
@@ -332,12 +352,17 @@ shell.plot = function plot(element, x_range_seconds, x_stop_seconds) {
                 }
 
                 var res = [ ];
+                var last = null;
                 for (var i = 0; i < msg.length; i++) {
-                    res[i] = [ timestamp, compute_sample(msg[i]) ];
+                    last = compute_sample(msg[i]);
+                    res[i] = [ timestamp, last ];
                     timestamp += options.interval;
                 }
 
                 callback (res);
+
+                if (last !== null)
+                    $(self).triggerHandler("value", [ last ]);
             }
 
             function handle_message(event, message) {
@@ -365,7 +390,15 @@ shell.plot = function plot(element, x_range_seconds, x_stop_seconds) {
             return channel;
         }
 
-        metrics = desc.metrics.map(function (n) { return { name: n, units: desc.units, derive: desc.derive }; });
+        function build_metric(n) {
+            return { name: n, units: desc.units, derive: desc.derive };
+        }
+
+        metrics = desc.direct.map(build_metric);
+        var fallback = null;
+
+        if (desc.internal)
+            fallback = desc.internal.map(build_metric);
 
         var chanopts = {
             payload: "metrics1",
@@ -476,22 +509,43 @@ shell.plot = function plot(element, x_range_seconds, x_stop_seconds) {
         reset_series();
         add_series();
 
-        real_time_channel = channel_sampler($.extend({ source: "direct",
-                                                       interval: real_time_samples_interval,
+        function process_samples(vals) {
+            real_time_samples_pos += 1;
+            if (real_time_samples_pos >= max_real_time_samples)
+                real_time_samples_pos = 0;
+            else
+                n_real_time_samples += 1;
+            real_time_samples[real_time_samples_pos] = vals[0][1];
+            real_time_samples_timestamp = vals[0][0];
+        }
 
-                                                     },
-                                                     chanopts),
-                                            function (vals) {
-                                                real_time_samples_pos += 1;
-                                                if (real_time_samples_pos >= max_real_time_samples)
-                                                    real_time_samples_pos = 0;
-                                                else
-                                                    n_real_time_samples += 1;
-                                                real_time_samples[real_time_samples_pos] = vals[0][1];
-                                                real_time_samples_timestamp = vals[0][0];
-                                            });
-        $(real_time_channel).on("close", function (event, message) {
+        function channel_closed(ev, options, desc) {
             real_time_channel = null;
+            if (options.problem && options.problem != "terminated" && options.problem != "disconnected")
+                console.log("problem retrieving " + desc + " metrics data: " + options.problem);
+        }
+
+        real_time_channel = channel_sampler($.extend({ }, chanopts, {
+            source: "direct",
+            interval: real_time_samples_interval
+        }), process_samples);
+        $(real_time_channel).on("close", function (event, options) {
+
+            /* Go for the fallback internal metrics if these metrics are not supported */
+            if ((options.problem == "not-supported" || options.problem == "not-found") && fallback) {
+                real_time_channel = channel_sampler($.extend({ }, chanopts, {
+                    source: "internal",
+                    interval: real_time_samples_interval,
+                    metrics: fallback
+                }), process_samples);
+                $(real_time_channel).on("close", function(event, options) {
+                    channel_closed(event, options, "internal");
+                });
+
+            /* Otherwise it could be just a normal failure */
+            } else {
+                channel_closed(event, options, "real time");
+            }
         });
 
         function sample_real_time(t1, t2) {
@@ -537,8 +591,20 @@ shell.plot = function plot(element, x_range_seconds, x_stop_seconds) {
         hover(null);
     }
 
+    function selecting(event, ranges) {
+        if (ranges)
+            $(result).triggerHandler("zoomstart", [ ]);
+    }
+
+    function selected(event, ranges) {
+        flot.clearSelection(true);
+        $(result).triggerHandler("zoom", [ (ranges.xaxis.to - ranges.xaxis.from) / 1000, ranges.xaxis.to / 1000]);
+    }
+
     $(element).on("plothover", hover_on);
     $(element).on("mouseleave", hover_off);
+    $(element).on("plotselecting", selecting);
+    $(element).on("plotselected", selected);
 
     reset(x_range_seconds, x_stop_seconds);
 
@@ -551,10 +617,307 @@ shell.plot = function plot(element, x_range_seconds, x_stop_seconds) {
         destroy: destroy,
         resize: resize,
         set_options: set_options,
+        get_options: get_options,
         add_metrics_sum_series: add_metrics_sum_series
     });
 
     return result;
 };
 
-})(jQuery, shell);
+shell.plot_simple_template = function simple() {
+    return {
+        colors: [ "#0099d3" ],
+        legend: { show: false },
+        series: { shadowSize: 0,
+            lines: {
+                lineWidth: 0.0,
+                fill: 1.0
+            }
+        },
+        xaxis: { tickColor: "#d1d1d1",
+                 mode: "time",
+                 tickFormatter: shell.format_date_tick,
+                 minTickSize: [ 1, 'minute' ],
+                 reserveSpace: false
+               },
+        yaxis: { tickColor: "#d1d1d1",
+               },
+        /*
+         * The point radius influences the margin around the grid even if no points
+         * are plotted. We don't want any margin, so we set the radius to zero.
+         */
+        points: {
+            radius: 0
+        },
+        grid: {
+            borderWidth: 1,
+            aboveData: true,
+            color: "black",
+            borderColor: $.color.parse("black").scale('a', 0.22).toString(),
+            labelMargin: 0
+        }
+    };
+};
+
+shell.memory_ticks = function memory_ticks(opts) {
+    // Not more than 5 ticks, nicely rounded to powers of 2.
+    var size = Math.pow(2.0, Math.ceil(Math.log(opts.max/5)/Math.LN2));
+    var ticks = [ ];
+    for (var t = 0; t < opts.max; t += size)
+        ticks.push(t);
+    return ticks;
+};
+
+var month_names = [ 'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec' ];
+
+shell.format_date_tick = function format_date_tick(val, axis) {
+    function pad(n) {
+        var str = n.toFixed();
+        if(str.length == 1)
+            str = '0' + str;
+        return str;
+    }
+
+    var year_index = 0;
+    var month_index = 1;
+    var day_index = 2;
+    var hour_minute_index = 3;
+
+    var begin;
+    var end;
+
+    // Determine the smallest unit according to the steps from one
+    // tick to the next.
+
+    var size = axis.tickSize[1];
+    if (size == "minute" || size == "hour")
+        end = hour_minute_index;
+    else if (size == "day")
+        end = day_index;
+    else if (size == "month")
+        end = month_index;
+    else
+        end = year_index;
+
+    // Determine biggest unit according to how far away the left edge
+    // of the graph is from 'now'.
+
+    var n = new Date();
+    var l = new Date(axis.min);
+
+    begin = year_index;
+    if (l.getFullYear() == n.getFullYear()) {
+        begin = month_index;
+        if (l.getMonth() == n.getMonth()) {
+            begin = day_index;
+            if (l.getDate() == n.getDate())
+                begin = hour_minute_index;
+        }
+    }
+
+    // Adjust so that it all makes sense
+
+    if (begin > end)
+        begin = end;
+    if (begin == day_index)
+        begin = month_index;
+
+    // And render it
+
+    var d = new Date(val);
+    var label = " ";
+
+    if (year_index >= begin && year_index <= end)
+        label += d.getFullYear().toFixed() + " ";
+    if (month_index >= begin && month_index <= end)
+        label += C_("month-name", month_names[d.getMonth()]) + " ";
+    if (day_index >= begin && day_index <= end)
+        label += d.getDate().toFixed() + " ";
+    if (hour_minute_index >= begin && hour_minute_index <= end)
+        label += pad(d.getHours()) + ':' + pad(d.getMinutes()) + " ";
+
+    return label.substr(0, label.length-1);
+};
+
+shell.format_bytes_tick = function format_bytes_tick(val, axis) {
+    var max = cockpit.format_bytes(axis.max, 1024, true);
+    return cockpit.format_bytes(val, max[1]);
+};
+
+shell.format_bytes_per_sec_tick = function format_bytes_per_sec_tick(val, axis) {
+    var max = cockpit.format_bytes_per_sec(axis.max, 1024, true);
+    return cockpit.format_bytes_per_sec(val, max[1]);
+};
+
+shell.format_bits_per_sec_tick = function format_bits_per_sec_tick(val, axis) {
+    var max = cockpit.format_bits_per_sec(axis.max*8, 1000, true);
+    return cockpit.format_bits_per_sec(val*8, max[1]);
+};
+
+shell.setup_plot_controls = function setup_plot_controls(container, element, plots) {
+
+    var plot_min_x_range = 5*60;
+    var plot_zoom_steps = [ 5*60,  60*60, 6*60*60, 24*60*60, 7*24*60*60, 30*24*60*60, 365*24*60*60 ];
+
+    var plot_x_range = 5*60;
+    var plot_x_stop;
+    var zoom_history = [ ];
+
+    element.find('[data-range]').click(function () {
+        zoom_history = [ ];
+        plot_x_range = parseInt($(this).attr('data-range'), 10);
+        plot_reset();
+    });
+
+    element.find('[data-action="goto-now"]').click(function () {
+        plot_x_stop = undefined;
+        plot_reset();
+    });
+
+    element.find('[data-action="scroll-left"]').click(function () {
+        var step = plot_x_range / 10;
+        if (plot_x_stop === undefined)
+            plot_x_stop = (new Date()).getTime() / 1000;
+        plot_x_stop -= step;
+        plot_reset();
+    });
+
+    element.find('[data-action="scroll-right"]').click(function () {
+        var step = plot_x_range / 10;
+        if (plot_x_stop !== undefined) {
+            plot_x_stop += step;
+            plot_reset();
+        }
+    });
+
+    element.find('[data-action="zoom-out"]').click(function () {
+        zoom_plot_out();
+    });
+
+    function zoom_plot_start() {
+        if (plot_x_stop === undefined) {
+            plots.forEach(function (p) {
+                p.stop_walking();
+            });
+            plot_x_stop = (new Date()).getTime() / 1000;
+            update_plot_buttons();
+        }
+    }
+
+    function zoom_plot_in(x_range, x_stop) {
+        zoom_history.push(plot_x_range);
+        plot_x_range = x_range;
+        plot_x_stop = x_stop;
+        plot_reset();
+    }
+
+    function zoom_plot_out() {
+        var r = zoom_history.pop();
+        if (r === undefined) {
+            var i;
+            for (i = 0; i < plot_zoom_steps.length-1; i++) {
+                if (plot_zoom_steps[i] > plot_x_range)
+                    break;
+            }
+            r = plot_zoom_steps[i];
+        }
+        if (plot_x_stop !== undefined)
+            plot_x_stop += (r - plot_x_range)/2;
+        plot_x_range = r;
+        plot_reset();
+    }
+
+    function format_range(seconds) {
+        function fmt(sing, plur, n) {
+            return cockpit.format(cockpit.ngettext(sing, plur, n), n);
+        }
+        if (seconds >= 365*24*60*60)
+            return fmt("$0 year", "$0 years", Math.ceil(seconds / (365*24*60*60)));
+        else if (seconds >= 30*24*60*60)
+            return fmt("$0 month", "$0 months", Math.ceil(seconds / (30*24*60*60)));
+        else if (seconds >= 7*24*60*60)
+            return fmt("$0 week", "$0 weeks", Math.ceil(seconds / (7*24*60*60)));
+        else if (seconds >= 24*60*60)
+            return fmt("$0 day", "$0 days", Math.ceil(seconds / (24*60*60)));
+        else if (seconds >= 60*60)
+            return fmt("$0 hour", "$0 hours", Math.ceil(seconds / (60*60)));
+        else
+            return fmt("$0 minute", "$0 minutes", Math.ceil(seconds / 60));
+    }
+
+    function update_plot_buttons() {
+        element.find('[data-action="scroll-right"]')
+            .attr('disabled', plot_x_stop === undefined);
+        element.find('[data-action="zoom-out"]')
+            .attr('disabled', plot_x_range >= plot_zoom_steps[plot_zoom_steps.length-1]);
+    }
+
+    function update_selection_zooming() {
+        var mode;
+
+        if (container.hasClass('show-zoom-controls') && plot_x_range > plot_min_x_range) {
+            container.addClass('show-zoom-cursor');
+            mode = "x";
+        } else {
+            container.removeClass('show-zoom-cursor');
+            mode = null;
+        }
+
+        plots.forEach(function (p) {
+            var options = p.get_options();
+            if (!options.selection || options.selection.mode != mode) {
+                options.selection = { mode: mode, color: "#d4edfa" };
+                p.set_options(options);
+                p.refresh();
+            }
+        });
+    }
+
+    function plot_reset() {
+        if (plot_x_range < plot_min_x_range) {
+            plot_x_stop += (plot_min_x_range - plot_x_range)/2;
+            plot_x_range = plot_min_x_range;
+        }
+        if (plot_x_stop >= (new Date()).getTime() / 1000 - 10)
+            plot_x_stop = undefined;
+
+        element.find('.dropdown-toggle span:first-child').text(format_range(plot_x_range));
+
+        plots.forEach(function (p) {
+            p.stop_walking();
+            p.reset(plot_x_range, plot_x_stop);
+            p.refresh();
+            if (plot_x_stop === undefined)
+                p.start_walking();
+
+            $(p).on("changed", function() {
+                if (p.archives) {
+                    container.addClass('show-zoom-controls');
+                    update_selection_zooming();
+                }
+            });
+        });
+
+        update_plot_buttons();
+        update_selection_zooming();
+    }
+
+    function reset(p) {
+        if (p === undefined)
+            p = [ ];
+        plots = p;
+        plots.forEach(function (p) {
+            $(p).on("zoomstart", function (event) { zoom_plot_start(); });
+            $(p).on("zoom", function (event, x_range, x_stop) { zoom_plot_in(x_range, x_stop); });
+        });
+        plot_reset();
+    }
+
+    reset(plots);
+
+    return {
+        reset: reset
+    };
+};
+
+});
