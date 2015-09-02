@@ -20,14 +20,14 @@
 define([
     "jquery",
     "base1/cockpit",
-    "base1/patterns",
     "base1/mustache",
-    "kubernetes/client"
-], function(jQuery, cockpit, patterns, Mustache, kubernetes) {
+    "kubernetes/client",
+    "base1/patterns"
+], function(jQuery, cockpit, Mustache, kubernetes) {
     "use strict";
 
     var _ = cockpit.gettext;
-    var $ = jQuery.scoped("#adjust-dialog", patterns);
+    var $ = jQuery.scoped("#adjust-dialog");
 
     var kube = null;
 
@@ -55,10 +55,10 @@ define([
                 .attr("disabled", "disabled");
 
             /* Generate table rows for each replication controller this service matches */
-            var rcs = kube.select(spec.selector || { }, meta.namespace,
-                                  "ReplicationController", true);
+            var rcs = kube.select("ReplicationController", meta.namespace,
+                                  spec.selector || { }, true);
 
-            var replicas = rcs.map(function(item) {
+            var replicas = rcs.items.map(function(item) {
                 var meta = item.metadata || { };
                 var spec = item.spec || { };
                 return {
@@ -73,7 +73,7 @@ define([
             $("table.cockpit-form-table").append(Mustache.render(template, { replicas: replicas }));
 
             /* Only show header if any replicas */
-            $(".adjust-replicas-header").toggle(rcs.length > 0);
+            $(".adjust-replicas-header").toggle(replicas.length > 0);
         })
         .on("hide.bs.modal", function(ev) {
             $("tr.adjust-replicas").remove();

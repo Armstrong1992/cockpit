@@ -41,69 +41,68 @@ class TestRoles(MachineCase):
         b.wait_visible("#login")
         login("user", "foobar")
         b.expect_reload()
-        b.wait_present("#content")
+        b.enter_page("server")
+        b.switch_to_top()
         b.wait_text('#content-user-name', 'User')
 
-        # HACK: Logging in as "user" will try to create a default
-        # /var/lib/cockpit/machines file, but this will fail.
+        # HACK: Logging in as "user" will try to write to
+        # /var/lib/cockpit/, but this will fail.
         # https://github.com/cockpit-project/cockpit/issues/1248
-        self.allow_journal_messages("Can't write /var/lib/cockpit/machines: Failed to create file '/var/lib/cockpit/machines\\..*': Permission denied")
+        #
+        self.allow_journal_messages(".*Failed to create file '/var/lib/cockpit/.*': Permission denied")
 
-        # Try to change its own name
+        # Check permissions for own account
         b.click('#content-user-name')
         b.click('#go-account')
-        b.enter_page("account")
+        b.enter_page("/users/local")
+
         b.wait_text("#account-user-name", "user")
-        b.wait_present("#account-real-name:not([disabled])")
+        b.wait_present('#account-real-name-wrapper.disabled')
         b.wait_present("#account-locked[disabled]")
-        b.wait_present("#account-set-password.disabled")
+        b.wait_present("#account-set-password:not(.disabled)")
         b.wait_present("#account-delete.disabled")
         b.wait_present("#account-logout.disabled")
-        b.wait_present("#account-change-roles.disabled")
-        b.wait_present("#account-change-roles.disabled")
-        b.wait_present('#account-real-name.disabled')
+        b.wait_present("#account-role-checkbox-10[disabled]")
+        b.wait_present("#account-role-checkbox-10:not(:checked)")
 
-        # Try to change admins name
-        b.go("account?id=admin")
-        b.enter_page("account")
+        # Check permissions for admin account
+        b.go("/admin")
+        b.wait_visible("#account")
         b.wait_text("#account-user-name", "admin")
-        b.wait_present("#account-real-name[disabled]")
+        b.wait_present('#account-real-name-wrapper.disabled')
         b.wait_present("#account-locked[disabled]")
         b.wait_present("#account-set-password.disabled")
         b.wait_present("#account-delete.disabled")
         b.wait_present("#account-logout.disabled")
-        b.wait_present("#account-change-roles.disabled")
-        b.wait_present("#account-change-roles.disabled")
+        b.wait_present("#account-role-checkbox-10[disabled]")
+        b.wait_present("#account-role-checkbox-10:checked")
 
-        # Add role from the outside (and wait for it to stick)
-        b.go("account?id=user")
-        b.enter_page("account")
+        # Add "wheel" role from the outside (and wait for it to stick)
+        b.go("/user")
+        b.wait_visible("#account")
         b.wait_text("#account-user-name", "user")
 
+        b.wait_present("#account-role-checkbox-10:not(:checked)")
         m.execute("usermod -a -G wheel user")
-        b.wait_text("#account-roles", "Server Administrator")
+        b.wait_present("#account-role-checkbox-10:checked")
 
-        b.relogin("account", "user")
+        b.relogin("/users/local", "user")
         b.wait_text("#account-user-name", "user")
 
-        # Try to change admins name again
-        b.enter_page("account")
-        b.go("account?id=admin")
+        # Check permissions for admin again
+        b.go("/admin")
+        b.wait_visible("#account")
         b.wait_text("#account-user-name", "admin")
-        b.wait_present("#account-real-name:not([disabled])")
+        b.wait_present("#account-real-name-wrapper:not(.disabled)")
         b.wait_present("#account-locked:not([disabled])")
         b.wait_present("#account-set-password:not(.disabled)")
         b.wait_present("#account-delete:not(.disabled)")
         b.wait_present("#account-logout:not(.disabled)")
-        b.wait_present("#account-change-roles:not(.disabled)")
-        b.wait_present("#account-change-roles:not(.disabled)")
+        b.wait_present("#account-role-checkbox-10:not([disabled])")
+        b.wait_present("#account-role-checkbox-10:checked")
 
-        b.set_val('#account-real-name', "Administratorrrr")
-
-        b.go("account?id=admin")
-        b.enter_page("account")
-        b.wait_val("#account-real-name", "Administratorrrr")
         self.allow_restart_journal_messages()
+        self.allow_authorize_journal_messages()
 
     def testDynamic(self):
         m = self.machine
@@ -111,23 +110,12 @@ class TestRoles(MachineCase):
 
         m.execute("groupadd docker")
 
-        self.login_and_go("accounts", href="/users/local")
-        b.go("account?id=admin")
+        self.login_and_go("/users/local")
+        b.go("/admin")
 
-        b.click("#account-change-roles")
-        b.wait_popup("account-change-roles-dialog")
         b.wait_in_text("#account-change-roles-roles", "Container Administrator")
-        b.click("#account-change-roles-dialog button:contains('Cancel')")
-        b.wait_popdown("account-change-roles-dialog")
 
-        b.click("#account-change-roles")
-        b.wait_popup("account-change-roles-dialog")
-
-        # The roles dialog is live, removes entries even when open
         m.execute("groupdel docker")
         b.wait_not_in_text("#account-change-roles-roles", "Container Administrator")
-
-        b.click("#account-change-roles-dialog button:contains('Cancel')")
-        b.wait_popdown("account-change-roles-dialog")
 
 test_main()

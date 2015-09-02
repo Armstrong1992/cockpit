@@ -228,7 +228,10 @@
       <para>Ask Cockpit to jump to another component. The location of the current component will
         not be affected. The <code>path</code> argument can be a string path, starting with <code>/</code>
         or an array containing the parts of a path that will be joined to create a path. If <code>host</code>
-        is not specified, then the component on the same host as the caller will be displayed.</para>
+        is not specified, then the component on the same host as the caller will be displayed. If
+        host is null, then the host portion of the path will be removed, displaying the component on
+        the host that cockpit is connected directly to. This is mostly useful for displaying a
+        dashboard or other multi-machine components.</para>
       <para>If the calling component is not running within Cockpit, or the calling component is not
         currently displayed, then the jump will not happen, and this function has no effect.</para>
     </refsection>
@@ -302,11 +305,13 @@
         </varlistentry>
 	<varlistentry>
 	  <term><code>"superuser"</code></term>
-	  <listitem><para>Try to spawn the process as root instead of the logged in user. If the
-            currently logged in user is not permitted to become root (eg: via <code>pkexec</code>)
-	    then the <code>client</code> will immediately be
-	    <link linkend="cockpit-dbus-onclose">closed</link> with a <code>"access-denied"</code>
-            problem code.</para></listitem>
+          <listitem><para>Set to <code>"require"</code> to spawn the process as root instead of
+              the logged in user. If the currently logged in user is not permitted to become root
+              (eg: via <code>pkexec</code>) then the <code>client</code> will immediately be
+  	      <link linkend="cockpit-dbus-onclose">closed</link> with a <code>"access-denied"</code>
+              problem code.</para>
+          <para>Set to <code>"try"</code> to try to run the process as root, but if that fails,
+              fall back to an unprivileged process.</para></listitem>
 	</varlistentry>
       </variablelist>
 
@@ -320,6 +325,36 @@
         object. Any non-UTF8 output from the process will be coerced into textual form.
         It is highly recommended that only textual output be produced by the command.
         The standard error is logged to the journal.</para>
+    </refsection>
+
+    <refsection id="cockpit-spawn-script">
+      <title>cockpit.script()</title>
+<programlisting>
+ process = cockpit.script(script, [args], [options])
+</programlisting>
+
+      <para>Run a shell script on the system.</para>
+
+      <para>This function <link linkend="cockpit-spawn-spawn">spawns</link> a Bourne shell script
+        process. The full text of the <code>/bin/sh</code> shell script should be passed in as
+        the first argument. The <code>args</code> can be an array of arguments, not including
+        the executable, which are passed to the script as <code>$1</code>, <code>$2</code> and
+        so on. Shebang options are not used or respected.</para>
+
+      <para>The <code>options</code> is an optional javascript plain object and can include
+        any of the fields listed for the
+        <link linkend="cockpit-spawn-spawn"><code>cockpit.spawn()</code></link> function.</para>
+
+      <para>The spawned process is a
+        <ulink url="http://api.jquery.com/category/deferred-object/">jQuery promise</ulink>
+        that will complete if the script exits successfully, or fail if there's a problem.
+        Some additional methods besides the standard jQuery promise methods are documented
+        below.</para>
+
+      <para>The standard output of the process is made available via the spawned process
+        object. Any non-UTF8 output from the process will be coerced into textual form.
+        It is highly recommended that only textual output be produced by the command.
+        The standard error is logged to the journal by default.</para>
     </refsection>
 
     <refsection id="cockpit-spawn-done">
@@ -598,14 +633,16 @@
         </varlistentry>
         <varlistentry>
           <term><code>"superuser"</code></term>
-          <listitem><para>Try to become root before talking to this service. The DBus service
-            will see the DBus method calls and accesses as coming from root, rather than the
-            logged in user. This is useful for talking to services that do not correctly use
-            <ulink url="http://www.freedesktop.org/software/polkit">polkit</ulink> to authorize
-            administrative users. If the currently logged in user is not
+          <listitem><para>Set to <code>"require"</code> to talk to this service as root.
+            The DBus service will see the DBus method calls and accesses as coming from root,
+            rather than the logged in user. This is useful for talking to services that do not
+            correctly use <ulink url="http://www.freedesktop.org/software/polkit">polkit</ulink>
+            to authorize administrative users. If the currently logged in user is not
             permitted to become root (eg: via <code>pkexec</code>) then the <code>client</code> will
             immediately be <link linkend="cockpit-dbus-onclose">closed</link> with a
-            <code>"access-denied"</code> problem code.</para></listitem>
+            <code>"access-denied"</code> problem code.</para>
+          <para>Set to <code>"try"</code> to try to talk as root, but if that fails,
+            fall back to unprivileged.</para></listitem>
         </varlistentry>
         <varlistentry>
           <term><code>"track"</code></term>
@@ -638,6 +675,18 @@
       <para>The <code>options</code> will contain various close information, including a
         <code>"problem"</code> field which will be set if the channel was closed because
         of a problem.</para>
+    </refsection>
+
+    <refsection id="cockpit-dbus-onowned">
+      <title>client.onowner</title>
+<programlisting>
+ $(client).on("owner", function(event, owner) { ... })
+</programlisting>
+      <para>An event triggered when the owner of the DBus name changes. The owner
+        value will be the id of the name owner on the bus or null if the name
+        is unowned. The absence of an owner should not be treated as a disconnection.
+        However this makes it possible to take some action based on the
+        actual status of the service, for example disconecting a pending signal handler.</para>
     </refsection>
 
     <refsection id="cockpit-dbus-options">
@@ -1315,10 +1364,15 @@
 </programlisting>
 
       <para>Create a new HTTP client. The <code>endpoint</code> can be a file path starting with
-        <code>/</code> to connect to a unix socket, or it can be a port number to connect to on
-        <code>localhost</code>.</para>
+        <code>/</code> to connect to a unix socket, or it can be a port number to connect to.</para>
 
       <variablelist>
+        <varlistentry>
+          <term><code>"address"</code></term>
+          <listitem><para>Connect to an address other than localhost. Must be a valid host name or IP address.
+            To use this option you also must provide a port number.</para></listitem>
+        </varlistentry>
+
         <varlistentry>
           <term><code>"connection"</code></term>
           <listitem><para>A connection identifier. Subsequent channel requests with the same
@@ -1326,10 +1380,13 @@
         </varlistentry>
         <varlistentry>
           <term><code>"superuser"</code></term>
-          <listitem><para>Try to open this channel as root. If the currently logged in user is not
-	    permitted to become root (eg: via <code>pkexec</code>) then the <code>channel</code> will
-            immediately be <link linkend="cockpit-channels-close-ev">closed</link> with a
-            <code>"access-denied"</code> problem code.</para></listitem>
+          <listitem><para>Set to <code>"require"</code> to open this channel as root. If the
+            currently logged in user is not permitted to become root (eg: via <code>pkexec</code>)
+            then the <code>channel</code> will immediately be
+            <link linkend="cockpit-channels-close-ev">closed</link> with a <code>"access-denied"</code>
+            problem code.</para>
+          <para>Set to <code>"try"</code> to try to make the request as root, but if that fails,
+            fall back to perform an unprivileged request.</para></listitem>
         </varlistentry>
       </variablelist>
 
@@ -1867,7 +1924,7 @@ handle = file.watch(callback);
     <para>Metrics about the system can be retrieved from several sources using
       <link linkend="cockpit-metrics"><code>cockpit.metrics()</code></link> metrics channels.
       The metrics are made available as series data, and can be used with the
-      <link linkend="cockpit-series"><code>cockpit.series()</code></link> and 
+      <link linkend="cockpit-series"><code>cockpit.series()</code></link> and
       <link linkend="cockpit-grid"><code>cockpit.grid()</code></link> facilities.</para>
 
     <refsection id="cockpit-metrics">
@@ -2290,6 +2347,69 @@ handle = file.watch(callback);
 
   </refsection>
 
+  <refsection id="cockpit-cache">
+    <title>Object Cache</title>
+
+    <para>If the same information is displayed by multiple components in Cockpit,
+      <code>cockpit.cache()</code> provides a way to share data between them. The shared
+      data should be simple objects, arrays, and values, and not contain functions or
+      other objects.</para>
+
+    <refsection>
+      <title>cockpit.cache()</title>
+<programlisting>
+  cache = cockpit.cache(key, provider, consumer)
+</programlisting>
+
+      <para>Create a new cache object. The <code>key</code> should be a globally unique string
+        that describes the data being cached. This string must describe the data, across all
+        machines and all versions of cockpit. It is customary to include a version number in
+        the <code>key</code> string.</para>
+
+<programlisting>
+  function provider(result, key) {
+      result("myvalue");
+
+      return {
+          close: function() {
+              /* closed */
+          }
+      };
+  }
+</programlisting>
+
+      <para>The <code>provider</code> is a function that will be invoked to start retrieving
+        data for the cache. It will be passed a <code>result</code> function as its first
+        argument. The <code>result</code> should be invoked whenever new data is available.
+        The <code>key</code> argument matches the key string the cache was created with.</para>
+
+      <para>The <code>provider</code> can return an object with a <code>close</code> method.
+        This method will be invoked when the cache no longer needs data from the provider.</para>
+
+<programlisting>
+  function consumer(value, key) {
+      /* ... */
+  }
+</programlisting>
+
+      <para>The <code>consumer</code> is a function that will be passed new values when they
+        are available, whether they come from the <code>provider</code> or a source in a
+        different component/frame.</para>
+
+    </refsection>
+
+    <refsection>
+      <title>cache.close()</title>
+<programlisting>
+  cache.close()
+</programlisting>
+
+      <para>Close a cache and stop calling its <code>consumer</code>. If the <code>provider</code>
+        was invoked, then the <code>close()</code> method it returned will be invoked.</para>
+    </refsection>
+
+  </refsection>
+
   <refsection id="cockpit-channels">
     <title>Raw Channels</title>
 
@@ -2332,10 +2452,13 @@ handle = file.watch(callback);
         </varlistentry>
         <varlistentry>
           <term><code>"superuser"</code></term>
-          <listitem><para>Try to open this channel as root. If the currently logged in user is not
-	    permitted to become root (eg: via <code>pkexec</code>) then the <code>channel</code> will
-            immediately be <link linkend="cockpit-channels-close-ev">closed</link> with a
-            <code>"access-denied"</code> problem code.</para></listitem>
+          <listitem><para>Set to <code>"require"</code> to open this channel as root. If the currently
+            logged in user is not permitted to become root (eg: via <code>pkexec</code>) then the
+            <code>channel</code> will immediately be
+            <link linkend="cockpit-channels-close-ev">closed</link> with a <code>"access-denied"</code>
+            problem code.</para>
+          <para>Set to <code>"try"</code> to try to open the channel as root, but if that fails,
+            then fall back to an unprivileged channel.</para></listitem>
         </varlistentry>
       </variablelist>
 

@@ -85,4 +85,37 @@ class TestReauthorize(MachineCase):
 
         self.assertEqual(b.text(".cockpit-internal-reauthorize span"), 'result: authorized')
 
+    def testSudo(self):
+        m = self.machine
+        b = self.browser
+
+        m.execute("useradd user -c 'Barney' || true")
+        m.execute("echo foobar | passwd --stdin user")
+
+
+        b.default_user = "user"
+        self.login_and_go("/playground/test")
+
+        b.click(".super-channel .btn")
+        b.wait_in_text(".super-channel span", 'result: ')
+
+        self.assertEqual(b.text(".super-channel span"), 'result: access-denied')
+
+        m.execute("echo 'user ALL=(ALL) NOPASSWD:ALL' >> /etc/sudoers.d/user-override")
+
+        # HACK: https://bugzilla.redhat.com/show_bug.cgi?id=1196451
+        # RHEL used to require this
+        m.execute("sed -i /requiretty/d /etc/sudoers")
+
+        b.logout()
+
+        self.login_and_go("/playground/test")
+
+        b.click(".super-channel .btn")
+        b.wait_in_text(".super-channel span", 'result: ')
+
+        self.assertIn('result: uid=0', b.text(".super-channel span"))
+
+        self.allow_authorize_journal_messages()
+
 test_main()

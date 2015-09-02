@@ -29,110 +29,95 @@ along with Cockpit; If not, see <http://www.gnu.org/licenses/>.
   <script src="../kubernetes/kubernetes.js"></script>
 </head>
 <body>
-  <div class="container-fluid">
-      <div class="kube-sidebar">
+    <div ng-controller="MainCtrl as main" ng-cloak>
+      <div class="kube-sidebar" ng-if="!curtains">
         <div>
-          <ul class="affix" data-spy="affix" data-offset-top="0">
-            <li class="active">
-              <a>
-                <span class="fa fa-dashboard fa-fw"></span> Overview
+          <ul>
+            <li ng-class="{ active: is_active('views/dashboard.html')}">
+              <a ng-href="#/">
+                <span class="fa fa-dashboard fa-fw"></span><br>Overview
               </a>
             </li>
-            <li>
-              <a>
-                <span class="fa fa-sitemap fa-fw"></span> Topology
+            <li ng-class="{ active: is_active('views/details.html')}">
+              <a ng-href="#/pods">
+                <span class="fa fa-cubes fa-fw"></span><br>Containers
               </a>
             </li>
-            <li>
-              <a>
-                <span class="fa fa-sliders fa-fw"></span> Browse
+            <li ng-class="{ active: is_active('views/topology.html')}">
+              <a ng-href="#/topology">
+                <span class="fa fa-sitemap fa-fw"></span><br>Topology
+              </a>
+            </li>
+            <li ng-class="{ active: is_active('views/listing.html')}">
+              <a ng-href="#/list">
+                <span class="fa fa-list fa-fw"></span><br>Details
               </a>
             </li>
           </ul>
         </div>
       </div>
 
-      <div id="content" class="row">
+      <div id="content" class="container-fluid" ng-view ng-if="!curtains">
+      </div>
 
-        <!-- TODO -->
-        <div id="graphs">
-          TODO: Graphs
+      <div class="curtains blank-slate-pf" ng-if="curtains && curtains.state != 'silent'">
+        <div class="blank-slate-pf-icon">
+          <div class="spinner spinner-lg" ng-if="curtains.state == 'connecting'"></div>
+          <i class="fa fa-exclamation-circle" ng-if="curtains.failure && curtains.failure.status != 403"></i>
+          <i class="fa fa-lock" ng-if="curtains.failure.status == 403"></i>
         </div>
-
-        <div class="row" ng-view></div>
-
+        <h1 ng-if="curtains.state == 'connecting'" translatable="yes">Connecting to Kubernetes</h1>
+        <h1 ng-if="curtains.state == 'failed'" translatable="yes">Couldn't connect to Kubernetes server</h1>
+        <p ng-if="curtains.message">{{curtains.failure.message}}</p>
+        <div class="blank-slate-pf-main-action" ng-if="curtains.state == 'failed'">
+          <button class="btn btn-primary btn-lg" translatable="yes" ng-click="reconnect()">
+            Reconnect
+          </button>
+        </div>
       </div>
     </div>
 
-  <script type="text/ng-template" id="dashboard.html">
-    <div class="col-md-8">
-      <div id="service-list" class="panel panel-default dashboard-list">
-        <div class="panel-heading">
-          <div style="float: right;">
-            <button class="btn btn-default fa fa-check" id="services-enable-change" title="Change"></button>
-            <button class="btn btn-primary" id="deploy-app" data-toggle="modal"
-                    data-target="#deploy-app-dialog" translatable="yes">Deploy</button>
-          </div>
-          <span translatable="yes">Kubernetes Services</span>
-        </div>
-        <table class="table table-hover">
-          <thead>
-            <tr>
-              <th translatable="yes">Name</th>
-              <th translatable="yes">Address</th>
-              <th translatable="yes">Containers</th>
-	      <th translatable="yes">Namespace</th>
-              <th class="status"></th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr ng-repeat="service in services" data-uid="{{service.uid}}">
-              <td>{{service.name}}</td>
-              <td>{{service.address}}{{service.ports}}</td>
-              <td>{{service.containers}}</td>
-              <td>{{service.namespace}}</td>
-              <td class="status" ng-init="item = service">
-                <button title="Adjust" class="btn btn-default adjust-service pficon pficon-edit"
-                    data-toggle="modal" data-target="#adjust-dialog" data-uid="{{service.uid}}"></button>
-                <span kubernetes-status-icon></span>
-              </td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-    </div>
+<!-- App Entity Params -->
 
-    <div class="col-md-4">
-      <div id="node-list" class="panel panel-default dashboard-list">
-        <div class="panel-heading">
-          <span style="float: right;">
-            <button title="Add Kubernetes Node" class="btn btn-primary fa fa-plus"></button>
-          </span>
-          <span translatable="yes">Kubernetes Nodes</span>
+  <script id="deploy-app-appentity-template" type="x-template/mustache">
+    {{#apps}}
+      <tr class="appentity">
+        <td >
+          <label class="app-name" for="{{app_name}}-label" >{{app_name}}</label>
+        </td>
+      </tr>
+    {{#app_params}}
+      <tr class="appentity">
+        <td class="top">
+          <label class="control-label" for="{{app_name}}-{{param_key}}-label" >{{param_key}}</label>
+        </td>
+        <td>
+          <input id="{{app_name}}-{{param_key}}-text" class="form-control" type="text" value={{param_value}}></input>
+        </td>
+      </tr>
+    {{/app_params}}
+    {{/apps}}
+  </script>
+
+  <!-- TODO: Move templates into separate files while debugging -->
+  <script type="text/ng-template" id="template/tabs/tabset.html">
+    <div>
+      <ul class="nav nav-{{type || 'tabs'}} nav-tabs-pf nav-tabs-clean"
+          ng-class="{'nav-stacked': vertical, 'nav-justified': justified}" ng-transclude></ul>
+      <div class="tab-content">
+        <div class="tab-pane clearfix" ng-repeat="tab in tabs" ng-class="{active: tab.active}" tab-content-transclude="tab">
         </div>
-        <table class="table table-hover">
-          <thead>
-            <tr>
-              <th translatable="yes">Machines</th>
-              <th translatable="yes">Address</th>
-              <th translatable="yes">Containers</th>
-              <th class="status"></th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr ng-repeat="node in nodes">
-              <td>{{node.name}}</td>
-              <td>{{node.address}}</td>
-              <td>{{node.containers}}</td>
-              <td class="status" ng-init="item = node">
-                <span kubernetes-status-icon></span>
-              </td>
-            </tr>
-          </tbody>
-        </table>
       </div>
     </div>
-    </script>
+  </script>
+
+  <script type="text/ng-template" id="template/tabs/tab.html">
+    <li ng-class="{active: active, disabled: disabled}">
+      <a href ng-click="select()" tab-heading-transclude>{{heading}}</a>
+    </li>
+  </script>
+
+  <!-- Dialogs -->
 
     <div class="modal" id="deploy-app-dialog" tabindex="-1" role="dialog" data-backdrop="static">
       <div class="modal-dialog">
@@ -144,13 +129,32 @@ along with Cockpit; If not, see <http://www.gnu.org/licenses/>.
             <table class="cockpit-form-table">
               <tr>
                 <td class="top">
+                  <label class="control-label" for="deploy-app-type-label" translatable="yes">
+                  Type
+                  </label>
+                </td>
+                <td id="deploy-app-type-field" class="dialog-wrapper">
+                  <div id="deploy-app-type-area">
+                    <select id="deploy-app-type" class="btn btn-default form-control selectpicker deploy-app-type-text">
+                      <option translatable="yes" class="deploy-app-type-text" value="manifest">Kubernetes Manifest</option>
+                      <option translatable="yes" class="deploy-app-type-text" value="nulecule">Nulecule Application</option>
+                    </select>
+                  </div>
+                </td>
+              </tr>
+              <tr>
+                <td class="top">
                   <label class="control-label" for="deploy-app-manifest" translatable="yes">
                   Manifest
+                  </label>
+                  <label class="control-label" for="deploy-app-nulecule" translatable="yes" >
+                  Nulecule
                   </label>
                 </td>
                 <input id="deploy-app-manifest-file" type="file">
                 <td class="dialog-wrapper">
                   <button id="deploy-app-manifest-file-button" class="btn btn-default form-control" type="button">Select Manifest File...</button>
+                  <input id="deploy-app-nulecule-image" class="form-control" type="text" placeholder="eg: docker/image">
                 </td>
               </tr>
               <tr>
@@ -166,9 +170,7 @@ along with Cockpit; If not, see <http://www.gnu.org/licenses/>.
                     <span class="input-group-btn" style="position: relative;">
                       <button class="btn btn-default dropdown-toggle" type="button"
                           data-toggle="dropdown"><span class="caret"></span></button>
-                      <ul class="dropdown-menu dropdown-menu-right" role="menu">
-                        <li><a>Action</a></li>
-                      </ul>
+                      <ul class="dropdown-menu dropdown-menu-right" role="menu"></ul>
                     </span>
                   </div>
                 </td>
@@ -225,22 +227,81 @@ along with Cockpit; If not, see <http://www.gnu.org/licenses/>.
           </div>
         </div>
       </div>
+    </div>
+
+    <div class="modal" id="node-dialog" tabindex="-1" role="dialog" data-backdrop="static">
+      <div class="modal-dialog modal-md">
+        <div class="modal-content">
+          <div class="modal-header">
+            <h4 class="modal-title" translatable="yes">Add Cluster Node </h4>
+          </div>
+          <div class="modal-body">
+            <table class="cockpit-form-table">
+              <tr>
+                <td class="top"><label class="control-label" for="node-name" translatable="yes"
+                        placeholder="eg: 198.51.10.25">Address</label></td>
+                <td class="top"><input id="node-address" type="text" class="form-control"></td>
+              </tr>
+              <tr>
+                <td class="top"><label class="control-label" for="node-name" translatable="yes"
+                        placeholder="eg: node-1">Name</label></td>
+                <td class="top"><input id="node-name" type="text" class="form-control"></td>
+              </tr>
+              <tr class="node-configure-header">
+                <td colspan="2" class="header">Configuration</td>
+              </tr>
+              <tr class="configure-option">
+                <td></td>
+                <td>
+                  <label>
+                    <input type="checkbox">
+                    <span translatable="yes">Configure Kubelet and Proxy</span>
+                  </label>
+                </td>
+              </tr>
+              <tr class="configure-option">
+                <td></td>
+                <td>
+                  <label>
+                    <input type="checkbox">
+                    <span translatable="yes">Configure Flannel networking</span>
+                  </label>
+                </td>
+              </tr>
+            </table>
+          </div>
+          <div class="modal-footer">
+            <button class="btn btn-default" translatable="yes" data-dismiss="modal">Cancel</button>
+            <button class="btn btn-primary" translatable="yes">Add</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
   </div>
 
   <script>
       require([
           "base1/cockpit",
           "translated!base1/po",
-          "kubernetes/angular",
+          "base1/angular",
+          "kubernetes/graphs",
           "kubernetes/deploy",
           "kubernetes/adjust",
+          "kubernetes/node",
           "kubernetes/app",
-          "kubernetes/dashboard"
+          "kubernetes/dashboard",
+          "kubernetes/details",
+          "kubernetes/topology",
+          "kubernetes/listing",
+          "kubernetes/object-describer"
       ], function(cockpit, po, angular) {
           "use strict";
           cockpit.locale(po);
           cockpit.translate();
-          angular.bootstrap(document, ["kubernetes"]);
+          angular.bootstrap(document, ["kubernetes"], {
+            strictDi: true
+          });
       });
   </script>
 </body>

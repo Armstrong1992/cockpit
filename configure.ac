@@ -16,7 +16,7 @@
 # along with Cockpit; If not, see <http://www.gnu.org/licenses/>.
 
 AC_INIT([Cockpit],
-        [0.56],
+        [m4_esyscmd([tools/git-version-gen .tarball])],
         [devel@lists.cockpit-project.org],
         [cockpit],
         [http://www.cockpit-project.org/])
@@ -50,16 +50,12 @@ AC_MSG_RESULT($enable_prefix_only)
 # Initialization
 #
 
-AC_PATH_PROG([XSLTPROC], [xsltproc])
-if test -z "$XSLTPROC"; then
-  AC_MSG_ERROR([xsltproc is needed])
-fi
-
 GLIB_VERSION="2.34"
 LIBSSH_VERSION="0.6.0"
 
 GIO_REQUIREMENT="gio-unix-2.0 >= $GLIB_VERSION"
-SYSTEMD_REQUIREMENT="libsystemd-journal >= 187 libsystemd-daemon"
+SYSTEMD_REQUIREMENT="libsystemd"
+SYSTEMD_REQUIREMENT_OLD="libsystemd-journal >= 187 libsystemd-daemon"
 JSON_GLIB_REQUIREMENT="json-glib-1.0 >= 0.14.0"
 POLKIT_REQUIREMENT="polkit-agent-1 >= 0.105"
 
@@ -68,7 +64,9 @@ GLIB_VERSION_DEF="GLIB_VERSION_$(echo $GLIB_VERSION | tr '.' '_')"
 GIO_CFLAGS="$GIO_CFLAGS -DGLIB_VERSION_MIN_REQUIRED=$GLIB_VERSION_DEF"
 GIO_CFLAGS="$GIO_CFLAGS -DGLIB_VERSION_MAX_ALLOWED=$GLIB_VERSION_DEF"
 
-PKG_CHECK_MODULES(SYSTEMD, [$SYSTEMD_REQUIREMENT])
+PKG_CHECK_MODULES(SYSTEMD, [$SYSTEMD_REQUIREMENT], [], [
+	PKG_CHECK_MODULES(SYSTEMD, [$SYSTEMD_REQUIREMENT_OLD])
+])
 PKG_CHECK_MODULES(JSON_GLIB, [$JSON_GLIB_REQUIREMENT])
 PKG_CHECK_MODULES(POLKIT, [$POLKIT_REQUIREMENT])
 
@@ -113,16 +111,6 @@ COCKPIT_WRAPPER_LIBS="$COCKPIT_LIBS"
 AC_SUBST(COCKPIT_WRAPPER_CFLAGS)
 AC_SUBST(COCKPIT_WRAPPER_LIBS)
 
-PKG_CHECK_MODULES(LVM_DEPS, [polkit-gobject-1 >= 0.92
-			     $POLKIT_REQUIREMENT
-			     lvm2app
-			     gudev-1.0 >= 164])
-
-COCKPIT_LVM_CFLAGS="$COCKPIT_CFLAGS $GIO_CFLAGS $LVM_DEPS_CFLAGS"
-COCKPIT_LVM_LIBS="$COCKPIT_LIBS $GIO_LIBS $LVM_DEPS_LIBS"
-AC_SUBST(COCKPIT_LVM_CFLAGS)
-AC_SUBST(COCKPIT_LVM_LIBS)
-
 # whether to build cockpit-ws
 AC_ARG_ENABLE(ws, AC_HELP_STRING([--disable-ws], [Disable cockpit-ws build]))
 
@@ -166,9 +154,10 @@ AC_CHECK_HEADER([security/pam_appl.h], ,
 AC_CHECK_LIB(pam, pam_open_session, [ true ],
   [AC_MSG_ERROR([Couldn't find PAM library. Try installing pam-devel])]
 )
-COCKPIT_SESSION_LIBS="$COCKPIT_SESSION_LIBS -lpam"
-COCKPIT_WS_LIBS="$COCKPIT_WS_LIBS -lpam"
-REAUTHORIZE_LIBS="$REAUTHORIZE_LIBS -lpam"
+PAM_LIBS="-lpam"
+COCKPIT_SESSION_LIBS="$COCKPIT_SESSION_LIBS $PAM_LIBS"
+COCKPIT_WS_LIBS="$COCKPIT_WS_LIBS $PAM_LIBS"
+REAUTHORIZE_LIBS="$REAUTHORIZE_LIBS $PAM_LIBS"
 
 # pam module directory
 AC_ARG_WITH([pamdir],
@@ -199,19 +188,42 @@ COCKPIT_WS_LIBS="$COCKPIT_WS_LIBS -lcrypt"
 REAUTHORIZE_LIBS="$REAUTHORIZE_LIBS -lcrypt"
 
 # pcp
-AC_CHECK_HEADER([pcp/pmapi.h], ,
-  [AC_MSG_ERROR([Couldn't find pcp headers. Try installing pcp-libs-devel])]
-)
-AC_CHECK_LIB(pcp, pmNewContext, [ true ],
-  [AC_MSG_ERROR([Couldn't find pcp library. Try installing pcp-libs-devel])]
-)
-COCKPIT_PCP_LIBS="$COCKPIT_PCP_LIBS -lpcp -lm"
+AC_MSG_CHECKING([whether to build with PCP])
+AC_ARG_ENABLE(pcp, AC_HELP_STRING([--disable-pcp], [Disable usage of PCP]))
+
+if test "$enable_pcp" = "no"; then
+  AC_MSG_RESULT($enable_pcp)
+
+else
+  if test "$enable_pcp" = ""; then
+    disable_msg="(perhaps --disable-pcp)"
+  fi
+
+  enable_pcp="yes"
+  AC_MSG_RESULT($enable_pcp)
+
+  AC_CHECK_HEADER([pcp/pmapi.h], ,
+    [AC_MSG_ERROR([Couldn't find pcp headers $disable_msg])]
+  )
+  AC_CHECK_LIB(pcp, pmNewContext, [ true ],
+    [AC_MSG_ERROR([Couldn't find pcp library $disable_msg])]
+  )
+  COCKPIT_PCP_LIBS="$COCKPIT_PCP_LIBS -lpcp -lm"
+fi
+
+AM_CONDITIONAL([ENABLE_PCP], [test "$enable_pcp" = "yes"])
 
 # gssapi
 AC_CHECK_LIB(gssapi_krb5, gss_import_cred,
   [AC_DEFINE_UNQUOTED(HAVE_GSS_IMPORT_CRED, 1, Whether gss_import_cred is available)])
 AC_CHECK_LIB(ssh, ssh_gssapi_set_creds,
   [AC_DEFINE_UNQUOTED(HAVE_SSH_GSSAPI_SET_CREDS, 1, Whether ssh_gssapi_set_creds is available)])
+
+# key auth
+AC_CHECK_LIB(ssh, ssh_set_agent_socket,
+  [AC_DEFINE_UNQUOTED(HAVE_SSH_SET_AGENT_SOCKET, 1, Whether ssh_set_agent_socket is available)
+  key_auth="yes"],
+  [key_auth="no"])
 
 # systemd
 AC_MSG_CHECKING(for systemd unit dir)
@@ -252,8 +264,19 @@ AC_DEFINE_UNQUOTED([PATH_USERMOD],["$USERMOD"],[Location of usermod binary])
 AC_PATH_PROG([PKEXEC], [pkexec], [/usr/sbin/pkexec], [$PATH:/usr/local/sbin:/usr/sbin:/sbin])
 AC_DEFINE_UNQUOTED([PATH_PKEXEC], ["$PKEXEC"], [Location of pkexec binary])
 
-# Config
+# sudo
+AC_PATH_PROG([SUDO], [sudo], [/usr/bin/sudo], [$PATH:/usr/local/sbin:/usr/sbin:/sbin])
+AC_DEFINE_UNQUOTED([PATH_SUDO], ["$SUDO"], [Location of sudo binary])
 
+# ssh-add
+AC_PATH_PROG([SSH_ADD], [ssh-add], [/usr/bin/ssh-add], [$PATH:/usr/local/sbin:/usr/sbin:/sbin])
+AC_DEFINE_UNQUOTED([PATH_SSH_ADD], ["$SSH_ADD"], [Location of ssh-add binary])
+
+# ssh-agent
+AC_PATH_PROG([SSH_AGENT], [ssh-agent], [/usr/bin/ssh-agent], [$PATH:/usr/local/bin:/usr/bin:/bin])
+AC_DEFINE_UNQUOTED([PATH_SSH_AGENT], ["$SSH_AGENT"], [Location of ssh-agent binary])
+
+# Config
 AC_DEFINE_UNQUOTED([COCKPIT_CONFIG_FILE],["$sysconfdir/cockpit/cockpit.conf"],[Configuration file])
 
 changequote(,)dnl
@@ -356,11 +379,13 @@ AM_CONDITIONAL([ENABLE_DOC], [test "$enable_doc" = "yes"])
 AC_MSG_CHECKING([for branding directory])
 AC_ARG_WITH(branding,
             AC_HELP_STRING([--with-branding=default],
-                           [Specify which branding to use])
+                           [Specify which branding to use.  A value of "auto" means to detect it at run-time.])
 )
-BRAND=branding/${with_branding:-default}
+BRAND=${with_branding:-default}
 AC_MSG_RESULT($BRAND)
-AC_SUBST(BRAND)
+if test "$BRAND" != "auto"; then
+  AC_DEFINE_UNQUOTED([PACKAGE_BRAND], ["$BRAND"], [Which brand to show.])
+fi
 
 # Debug
 
@@ -375,8 +400,10 @@ if test "$enable_debug" != "no"; then
   AC_DEFINE_UNQUOTED(_DEBUG, 1, [In debug mode])
   CFLAGS="$CFLAGS -g"
 fi
+debugdir=${prefix}/src/debug
 if test "$enable_debug" = "yes"; then
   debug_status="yes"
+  debugdir=
   CFLAGS="$CFLAGS -O0"
 elif test "$enable_debug" = "no"; then
   debug_status="no"
@@ -386,6 +413,7 @@ else
 fi
 AM_CONDITIONAL(WITH_DEBUG, test "$enable_debug" = "yes")
 AC_MSG_RESULT($debug_status)
+AC_SUBST(debugdir)
 
 # Coverage
 
@@ -425,6 +453,7 @@ AC_MSG_RESULT($enable_strict)
 #
 
 AC_SUBST(REAUTHORIZE_LIBS)
+AC_SUBST(PAM_LIBS)
 
 AC_OUTPUT([
 Makefile
@@ -464,5 +493,13 @@ echo "
         Debug mode:                 ${debug_status}
         With coverage:              ${enable_coverage}
         With address sanitizer:     ${asan_status}
-	Branding directory:         ${BRAND}
+        With PCP:                   ${enable_pcp}
+	Branding:                   ${BRAND}
+        Supports key auth:          ${key_auth}
+
+        pkexec:                     ${PKEXEC}
+        ssh-add:                    ${SSH_ADD}
+        ssh-agent:                  ${SSH_AGENT}
+        sudo:                       ${SUDO}
+        usermod:                    ${USERMOD}
 "

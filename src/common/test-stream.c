@@ -437,8 +437,6 @@ test_write_error (void)
 
   g_assert_cmpstr (echo_stream->problem, ==, "internal-error");
 
-  close (fds[1]);
-
   g_object_unref (echo_stream);
 }
 
@@ -481,9 +479,12 @@ test_read_combined (void)
       ret = writev (fds_a[1], iov, 4);
       if (ret < 0 && (errno == EAGAIN || errno == EINTR))
         continue;
+      if (ret < 0)
+        g_message ("writev failed with %d: %s", ret, g_strerror (errno));
       g_assert_cmpint (ret, ==, 12);
+      break;
     }
-  while (0);
+  while (TRUE);
 
   while (echo_stream->received->len < 12)
     g_main_context_iteration (NULL, TRUE);

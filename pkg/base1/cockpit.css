@@ -171,53 +171,6 @@ a {
     vertical-align: super;
 }
 
-.journal-lines .panel-heading {
-    border-top: 1px solid #ddd;
-    border-bottom: 0;
-}
-
-.journal-lines .panel-heading:first-child {
-    border-top: 0;
-}
-
-.cockpit-logline {
-    border-top: 1px solid #ddd;
-    border-bottom: 1px transparent none;
-    padding: 10px;
-}
-
-.cockpit-logident {
-    display: inline-block;
-    vertical-align: top;
-    width: 10%;
-    box-sizing:border-box;
-    -moz-box-sizing:border-box;
-    -webkit-box-sizing:border-box;
-    overflow: hidden;
-    text-overflow: ellipsis;
-}
-
-.cockpit-logmsg {
-    display: inline-block;
-    width: 90%;
-    box-sizing:border-box;
-    -moz-box-sizing:border-box;
-    -webkit-box-sizing:border-box;
-    padding-right: 10px;
-}
-
-.cockpit-logtime {
-    float: right;
-}
-
-.cockpit-logtime .badge {
-    margin-right: 10px;
-}
-
-.cockpit-logmsg-reboot {
-    font-style: italic;
-}
-
 .cockpit-graph {
     position: relative;
     height: 70px;
@@ -246,48 +199,6 @@ a {
  */
 .filter-unimportant .unimportant {
     display: none;
-}
-
-/* Styling of logs embedded in pages outside the journal */
-
-.cockpit-log-panel {
-    border: 0;
-}
-
-.cockpit-log-panel .panel-heading {
-    background-color: #333;
-    border-color: #333;
-    color: #fff;
-    padding-left: 10px;
-    padding-top: 5px;
-    padding-bottom: 5px;
-    height: auto;
-}
-
-.cockpit-log-panel .panel-body {
-    padding: 0;
-    border-bottom: 1px #ddd solid;
-}
-
-.cockpit-log-panel .panel-body .panel-heading {
-    border-left: 1px #ddd solid;
-    border-right: 1px #ddd solid;
-    border-top: 1px #ddd solid;
-    border-bottom: 0;
-    background-color: #f5f5f5;
-    font-weight: bold;
-    padding-top: 2px;
-    padding-bottom: 2px;
-    width: auto;
-    color: #333;
-}
-
-.cockpit-log-panel .cockpit-logline {
-    border-left: 1px #ddd solid;
-    border-right: 1px #ddd solid;
-    background-color: #f5f5f5;
-    padding-top: 2px;
-    padding-bottom: 2px;
 }
 
 /*
@@ -340,8 +251,7 @@ a {
     cursor: pointer;
 }
 .table-hover > tbody > tr:hover > td,
-.table-hover > tbody > tr:hover > th,
-.cockpit-logline:hover {
+.table-hover > tbody > tr:hover > th {
     background-color: #d4edfa;
 }
 
@@ -397,6 +307,20 @@ a {
     min-width: 26px;
 }
 
+/* Well and Blankslate */
+
+.panel .well {
+    margin-bottom: 0px;
+    border: none;
+    border-radius: 0px;
+    background-color: #FAFAFA;
+}
+
+.well.blank-slate-pf {
+    box-shadow: 0px 0px 10px rgba(0, 0, 0, 0.05) inset;
+    padding-top: 40px;
+}
+
 /* Alert fixups */
 
 .alert {
@@ -437,45 +361,37 @@ a {
 
 .console {
     font-family: monospace, courier new;
-    margin-left: auto;
-    margin-right: auto;
     margin-top: 0;
     margin-bottom: 0;
-    line-height: 1;
-    font-size: 10pt;
+    font-size: 12px;
     text-align: center;
+    line-height: 1;
 }
 
 .console > .logs {
-    padding: 1em;
-    margin: 1em;
+    padding: 10px;
     text-align: left;
-    display: inline-block;
+    display: block;
     font-family: inherit;
-    width: 60em;
-    max-height: 40em;
+    font-size: inherit;
+    width: 48em;
+    height: 310px;
     overflow-y: scroll;
+    white-space: pre-wrap;
+    margin: 0 auto;
 }
 
 .console > .terminal {
+    color: #F0F0F0;
+    text-align: left;
+    outline: medium none;
     background-color: black;
-    padding: 1em;
-    margin: 1em;
+    border: 1px solid black;
+    padding: 10px;
     display: inline-block; /* size DIV to contents */
 }
 
-.container-fluid .console {
-    margin-top: 0;
-    float: right;
-}
-
-@media (max-width: 1350px) {
-    .container-fluid .console {
-	font-size: 11pt;
-    }
-}
-
-.terminal-cursor {
+.console .terminal-cursor {
     color: #000;
     background: #f0f0f0;
 }
@@ -498,10 +414,6 @@ a {
 
 /* Server stuff, not enough for own CSS yet */
 
-.journal-lines .cockpit-logline:hover {
-    cursor: pointer;
-}
-
 /* HACK: Need to update patternfly to work with latest bootstrap-select */
 .bootstrap-select.btn-group .dropdown-menu li a span.check-mark {
   display: none;
@@ -512,6 +424,11 @@ a {
   margin-bottom: 0px !important;
 }
 
+@media (min-width: 500px) {
+  .cockpit-modal-md {
+    width: 400px;
+  }
+}
 /* Password strength meter */
 
 .password-strength-meter {
@@ -546,3 +463,12 @@ a {
     background-color: #3F9C35;
 }
 
+/* allow text only branding */
+.navbar-pf .navbar-brand {
+    text-transform: uppercase;
+    margin: 0 8px;
+}
+
+.navbar-pf .navbar-brand:hover {
+    color: #F1F1F1;
+}

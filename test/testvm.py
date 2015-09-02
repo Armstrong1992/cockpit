@@ -17,6 +17,7 @@
 # You should have received a copy of the GNU Lesser General Public License
 # along with Cockpit; If not, see <http://www.gnu.org/licenses/>.
 
+import contextlib
 import errno
 import fcntl
 import guestfs
@@ -39,6 +40,27 @@ DEFAULT_ARCH = "x86_64"
 MEMORY_MB = 1024
 
 SSH_WARNING = re.compile(r'Warning: Permanently added .* to the list of known hosts.*\n')
+
+# based on http://stackoverflow.com/a/17753573
+# we use this to quieten down calls
+@contextlib.contextmanager
+def stdchannel_redirected(stdchannel, dest_filename):
+    """
+    A context manager to temporarily redirect stdout or stderr
+    e.g.:
+    with stdchannel_redirected(sys.stderr, os.devnull):
+        noisy_function()
+    """
+    try:
+        oldstdchannel = os.dup(stdchannel.fileno())
+        dest_file = open(dest_filename, 'w')
+        os.dup2(dest_file.fileno(), stdchannel.fileno())
+        yield
+    finally:
+        if oldstdchannel is not None:
+            os.dup2(oldstdchannel, stdchannel.fileno())
+        if dest_file is not None:
+            dest_file.close()
 
 class Failure(Exception):
     def __init__(self, msg):
@@ -65,11 +87,21 @@ class Machine:
 
         self.os = system or self.getconf('os') or os.environ.get("TEST_OS") or DEFAULT_OS
         self.arch = arch or os.environ.get("TEST_ARCH") or DEFAULT_ARCH
-        self.image = "%s-%s-%s" % (self.flavor, self.os, self.arch)
+
+        self.tag = "0"
+        tags = self.getconf('tags')
+        if tags and self.os in tags:
+            self.tag = tags[self.os]
+
+        self.image = "%s-%s-%s-%s" % (self.flavor, self.os, self.arch, self.tag)
         self.test_dir = os.path.abspath(os.path.dirname(__file__))
         self.test_data = os.environ.get("TEST_DATA") or self.test_dir
         self.vm_username = "root"
         self.vm_password = "foobar"
+        self.target_install_script = "~/install_packages.py"
+        self.install_packages_script = os.path.join(self.test_dir, "guest/%s-%s-install_packages" % (self.os, self.arch))
+        if not os.path.exists(self.install_packages_script):
+            self.install_packages_script = os.path.join(self.test_dir, "guest/default-install_packages")
         self.address = address
         self.mac = None
         self.label = label or "UNKNOWN"
@@ -148,6 +180,9 @@ class Machine:
         """Overridden by machine classes to gracefully shutdown the running machine"""
         assert False, "Cannot shutdown a machine we didn't start"
 
+    def needs_build(self):
+        return False
+
     def build(self, args):
         """Build a machine image for running tests.
 
@@ -168,7 +203,8 @@ class Machine:
                 "TEST_FLAVOR": self.flavor,
                 "TEST_SETUP_ARGS": " ".join(args),
             }
-            self.execute(script="/var/tmp/SETUP", environment=env)
+            self.message("run setup script on guest")
+            self.execute(script="/var/tmp/SETUP", environment=env, quiet=not self.verbose)
             self.execute(command="rm /var/tmp/SETUP")
             self.post_setup()
         finally:
@@ -191,6 +227,9 @@ class Machine:
             if not os.path.exists(rpm):
                 raise Failure("file does not exist: %s" % rpm)
 
+        if not rpms:
+            raise Failure("Please specify packages to install")
+
         self.start(maintain=True)
         try:
             self.wait_boot()
@@ -207,11 +246,14 @@ class Machine:
                 "TEST_PACKAGES": " ".join(uploaded),
                 "TEST_VERBOSE": self.verbose
             }
-            self.execute(script=INSTALL_SCRIPT, environment=env)
+            self.needs_writable_usr()
+            self.upload([self.install_packages_script], self.target_install_script)
+            script_to_run = INSTALL_SCRIPT % (self.target_install_script)
+            self.execute(script=script_to_run, environment=env)
         finally:
             self.stop()
 
-    def execute(self, command=None, script=None, input=None, environment={}):
+    def execute(self, command=None, script=None, input=None, environment={}, quiet=False):
         """Execute a shell command in the test machine and return its output.
 
         Either specify @command or @script
@@ -277,7 +319,8 @@ class Machine:
                         proc.stderr.close()
                     else:
                         data = SSH_WARNING.sub("", data)
-                        sys.stderr.write(data)
+                        if not quiet or self.verbose:
+                            sys.stderr.write(data)
             for fd in ret[1]:
                 if fd == stdin_fd:
                     if input:
@@ -311,7 +354,11 @@ class Machine:
 
         self.message("Uploading", " ,".join(sources))
         self.message(" ".join(cmd))
-        subprocess.check_call(cmd)
+        if self.verbose:
+            subprocess.check_call(cmd)
+        else:
+            with stdchannel_redirected(sys.stderr, os.devnull):
+                subprocess.check_call(cmd)
 
     def download(self, source, dest):
         """Download a file from the test machine.
@@ -351,6 +398,7 @@ class Machine:
         self.message(" ".join(cmd))
         subprocess.check_call([ "rm", "-rf", dest ])
         subprocess.check_call(cmd)
+        subprocess.check_call([ "find", dest, "-type", "f", "-exec", "chmod", "0644", "{}", ";" ])
 
     def write(self, dest, content):
         """Write a file into the test machine
@@ -399,7 +447,8 @@ class Machine:
 
         cmd = "journalctl 2>&1 -o cat -p %d %s || true" % (log_level, matches)
         messages = self.execute(cmd).splitlines()
-        if len(messages) == 1 and "Cannot assign requested address" in messages[0]:
+        if len(messages) == 1 and ("Cannot assign requested address" in messages[0]
+                                   or "-- No entries --" in messages[0]):
             # No messages
             return [ ]
         else:
@@ -415,18 +464,11 @@ class Machine:
 def highest_version(names, os):
     # XXX - maybe use the "rpm" module.
 
-    if os == "fedora-21":
-        # HACK - Our fedora-21 image can only boot with the rescue
-        # kernel/initrd sine the real one has the wrong root disk hard
-        # coded into it, probably because I made the magic base
-        # tarball wrong.
-        return filter(lambda n: "rescue" in n, names)[0]
-    else:
-        names = filter(lambda n: not "rescue" in n, names)
-        sorted = subprocess.check_output("echo '%s' | rpmdev-sort" % "\n".join(names),
-                                         shell=True).split("\n")
-        sorted = filter(lambda n: not n == "", sorted)
-        return sorted[len(sorted)-1]
+    names = filter(lambda n: not "rescue" in n, names)
+    sorted = subprocess.check_output("echo '%s' | rpmdev-sort" % "\n".join(names),
+                                     shell=True).split("\n")
+    sorted = filter(lambda n: not n == "", sorted)
+    return sorted[len(sorted)-1]
 
 class QemuMachine(Machine):
     macaddr_prefix = "52:54:00:9e:00"
@@ -434,11 +476,15 @@ class QemuMachine(Machine):
     def __init__(self, **args):
         Machine.__init__(self, **args)
         self.run_dir = os.path.join(self.test_dir, "run")
+
         self._image_image = os.path.join(self.run_dir, "%s.qcow2" % (self.image))
-        self._image_original = os.path.join(self.test_data, "images/%s.qcow2" % (self.image))
-        self._image_root = os.path.join(self.run_dir, "%s-root" % (self.image, ))
-        self._image_kernel = os.path.join(self.run_dir, "%s-kernel" % (self.image, ))
-        self._image_initrd = os.path.join(self.run_dir, "%s-initrd" % (self.image, ))
+        self._image_additional_iso = os.path.join(self.run_dir, "%s.iso" % (self.image))
+
+        self._images_dir = os.path.join(self.test_data, "images")
+        self._image_original = os.path.join(self._images_dir, "%s.qcow2" % (self.image))
+        self._iso_original = os.path.join(self._images_dir, "%s.iso" % (self.image))
+        self._checksum_original = os.path.join(self._images_dir, "%s-checksum" % (self.image))
+
         self._process = None
         self._monitor = None
         self._disks = { }
@@ -467,8 +513,7 @@ class QemuMachine(Machine):
         ifcfg_eth0 = 'BOOTPROTO="dhcp"\nDEVICE="eth0"\nONBOOT="yes"\n'
         gf.write("/etc/sysconfig/network-scripts/ifcfg-eth0", ifcfg_eth0)
 
-    def _setup_fedora_21 (self, gf):
-        self._setup_fstab(gf)
+    def _setup_fedora_like (self, gf):
         self._setup_ssh_keys(gf)
         self._setup_fedora_network(gf)
 
@@ -478,16 +523,9 @@ class QemuMachine(Machine):
         gf.mkdir_p("/etc/systemd/system/sockets.target.wants/")
         gf.ln_sf("/usr/lib/systemd/system/sshd.socket", "/etc/systemd/system/sockets.target.wants/")
 
-    def _setup_fedora_22 (self, gf):
-        self._setup_fstab(gf)
+    def _setup_fedora_rawhide (self, gf):
         self._setup_ssh_keys(gf)
         self._setup_fedora_network(gf)
-
-        # systemctl disable sshd.service
-        gf.rm_f("/etc/systemd/system/multi-user.target.wants/sshd.service")
-        # systemctl enable sshd.socket
-        gf.mkdir_p("/etc/systemd/system/sockets.target.wants/")
-        gf.ln_sf("/usr/lib/systemd/system/sshd.socket", "/etc/systemd/system/sockets.target.wants/")
 
     def _setup_rhel_7 (self, gf):
         self._setup_ssh_keys(gf)
@@ -504,141 +542,91 @@ class QemuMachine(Machine):
         gf.upload(os.path.expanduser("~/.rhel/login"), "/root/.rhel/login")
         gf.upload(os.path.expanduser("~/.rhel/pass"), "/root/.rhel/pass")
 
+    def run_modify_func(self, modify_func):
+        gf = guestfs.GuestFS(python_return_dict=True)
+        if self.verbose:
+            gf.set_trace(1)
+        try:
+            gf.add_drive_opts(self._image_image, readonly=False)
+            gf.launch()
+            # try to mount device directly
+            devices = gf.list_devices()
+            assert len(devices) == 1
+            try:
+                gf.mount(devices[0], "/")
+            except:
+                # if this fails, we may have to perform more intricate mounting
+                # get the first one that isn't swap and mount it as root
+                filesystems = gf.list_filesystems()
+                for fs in filesystems:
+                    if filesystems[fs] == "swap":
+                        continue
+                    gf.mount(fs, "/")
+                    if gf.exists("/etc"):
+                        break
+                    gf.umount("/")
+                if not gf.exists("/etc"):
+                    raise Failure("Can't find root partition")
+
+            modify_func(gf)
+            gf.touch("/.autorelabel")
+        finally:
+            gf.close()
+
     def unpack_base(self, modify_func=None):
         assert not self._process
 
         if not os.path.exists(self.run_dir):
             os.makedirs(self.run_dir, 0750)
 
-        image = "%s-%s" % (self.os, self.arch)
-        image_file = os.path.join(self.test_data, "%s.qcow2" % (image, ))
-        tarball = os.path.join(self.test_data, "%s.tar.gz" % (image, ))
-        if os.path.isfile(image_file):
-            """ We have a real image file, use that """
+        bootstrap_script = "./%s.bootstrap" % (self.os, )
+        magic_base_image = os.path.join(self.test_data, "%s-%s.qcow2" % (self.os, self.arch))
+
+        if os.path.exists(self._image_image):
+            os.unlink(self._image_image)
+        if os.path.exists(self._image_additional_iso):
+            os.unlink(self._image_additional_iso)
+
+        if os.path.isfile(bootstrap_script):
+            subprocess.check_call([ bootstrap_script, self._image_image, self.arch ])
+        elif os.path.isfile(magic_base_image):
             self.message("Creating disk copy:", self._image_image)
-            shutil.copyfile(image_file, self._image_image)
-            self._image_kernel = None
-            self._image_initrd = None
-            if modify_func:
-                gf = guestfs.GuestFS(python_return_dict=True)
-                if self.verbose:
-                    gf.set_trace(1)
-                try:
-                    gf.add_drive_opts(self._image_image, readonly=False)
-                    gf.launch()
-                    # try to mount device directly
-                    devices = gf.list_devices()
-                    assert len(devices) == 1
-                    try:
-                        gf.mount(devices[0], "/")
-                    except:
-                        # if this fails, we may have to perform more intricate mounting
-                        # get the first one that isn't swap and mount it as root
-                        filesystems = gf.list_filesystems()
-                        for fs in filesystems:
-                            if filesystems[fs] == "swap":
-                                continue
-                            gf.mount(fs, "/")
-                            break
-
-                    modify_func(gf)
-                finally:
-                    gf.close()
-
-        elif os.path.exists(tarball):
-            """We have an old-style magic base tarball."""
-
-            gf = guestfs.GuestFS(python_return_dict=True)
-            if self.verbose:
-                gf.set_trace(1)
-
-            try:
-                # Create a qcow2-format disk image
-                self.message("Building disk:", self._image_root)
-                subprocess.check_call([ "qemu-img", "create", "-q", "-f", "qcow2", self._image_root, "4G" ])
-
-                # Attach the disk image to libguestfs.
-                gf.add_drive_opts(self._image_root, format = "qcow2", readonly = 0)
-                gf.launch()
-
-                devices = gf.list_devices()
-                assert len(devices) == 1
-
-                gf.mkfs("ext2", devices[0])
-                gf.mount(devices[0], "/")
-
-                self.message("Unpacking %s into %s" % (tarball, self._image_root))
-                gf.tgz_in(tarball, "/")
-
-                kernel = highest_version(gf.glob_expand("/boot/vmlinuz-*"), self.os)
-                initrd = highest_version(gf.glob_expand("/boot/initramfs-*"), self.os)
-                self.message("Extracting:", kernel, initrd)
-                gf.download(kernel, self._image_kernel)
-                gf.download(initrd, self._image_initrd)
-
-                if modify_func:
-                    modify_func(gf)
-
-            finally:
-                gf.close()
+            shutil.copyfile(magic_base_image, self._image_image)
         else:
-            raise Failure("Unsupported configuration %s: neither %s nor %s found." % (image, image_file, tarball))
+            raise Failure("Unsupported OS %s: neither %s nor %s found." % (self.os, bootstrap_script, magic_base_image))
 
-    def post_setup(self):
-        if not self._image_image:
-            kernel = highest_version(self.execute(command="ls -1 /boot/vmlinuz-*").split("\n"), self.os)
-            initrd = highest_version(self.execute(command="ls -1 /boot/initramfs-*").split("\n"), self.os)
-            self.message("Extracting:", kernel, initrd)
-            self.download(kernel, self._image_kernel)
-            self.download(initrd, self._image_initrd)
+        if modify_func:
+            self.run_modify_func(modify_func)
 
     def save(self):
         assert not self._process
-        if self._image_image:
-            if not os.path.exists(self._image_image):
-                raise Failure("Nothing to save.")
-
-            images_dir = os.path.join(self.test_data, "images")
-            checksum_file = os.path.join(images_dir, "%s-checksum" % (self.image, ))
-            if not os.path.exists(images_dir):
-                os.makedirs(images_dir, 0750)
-            shutil.copy(self._image_image, images_dir)
-            with open(checksum_file, "w") as f:
-                subprocess.check_call([ "sha256sum",
-                                        os.path.basename(self._image_image) ],
-                                      cwd=images_dir,
+        if not os.path.exists(self._images_dir):
+            os.makedirs(self._images_dir, 0750)
+        if os.path.exists(self._image_image):
+            files = [ ]
+            # Copy image via convert, to make it sparse again
+            files.append(self._image_image)
+            subprocess.check_call([ "qemu-img", "convert", "-O", "qcow2", self._image_image, self._image_original ])
+            # Copy additional ISO as well when it exists
+            if os.path.exists(self._image_additional_iso):
+                files.append(self._image_additional_iso)
+                shutil.copy(self._image_additional_iso, self._images_dir)
+            with open(self._checksum_original, "w") as f:
+                subprocess.check_call([ "sha256sum" ] + map(os.path.basename, files),
+                                      cwd=self._images_dir,
                                       stdout=f)
         else:
-            if (not os.path.exists(self._image_kernel)
-                or not os.path.exists(self._image_initrd)
-                or not os.path.exists(self._image_root)):
-                raise Failure("Nothing to save.")
+            raise Failure("Nothing to save.")
 
-            if (os.path.islink(self._image_kernel)
-                or os.path.islink(self._image_initrd)):
-                raise Failure("Can not save now, only right after vm-create.")
-
-            images_dir = os.path.join(self.test_data, "images")
-            checksum_file = os.path.join(images_dir, "%s-checksum" % (self.image, ))
-            if not os.path.exists(images_dir):
-                os.makedirs(images_dir, 0750)
-            shutil.copy(self._image_root, images_dir)
-            shutil.copy(self._image_kernel, images_dir)
-            shutil.copy(self._image_initrd, images_dir)
-            with open(checksum_file, "w") as f:
-                subprocess.check_call([ "sha256sum",
-                                        os.path.basename(self._image_root),
-                                        os.path.basename(self._image_kernel),
-                                        os.path.basename(self._image_initrd) ],
-                                      cwd=images_dir,
-                                      stdout=f)
+    def needs_build(self):
+        return not os.path.exists(self._image_original)
 
     def build(self, args):
         def modify(gf):
-            if self.os == "fedora-21":
-                self._setup_fedora_21(gf)
-            elif self.os == "fedora-22":
-                self._setup_fedora_22(gf)
+            if self.os in [ "fedora-22", "fedora-22-testing", "centos-7" ]:
+                self._setup_fedora_like(gf)
+            elif self.os == "fedora-rawhide":
+                self._setup_fedora_rawhide(gf)
             elif self.os == "rhel-7":
                 credential_path = os.path.expanduser("~/.rhel/")
                 if (not os.path.isfile(credential_path + "login")) or (not os.path.isfile(credential_path + "pass")):
@@ -647,15 +635,14 @@ class QemuMachine(Machine):
             else:
                 raise Failure("Unsupported OS %s" % self.os)
 
-        script = "%s-%s.setup" % (self.flavor, self.os)
+        script = os.path.join(self.test_dir, "guest/%s-%s.setup" % (self.flavor, self.os))
         if not os.path.exists(script):
-            script_alternative = "%s-%s-setup.sh" % (self.flavor, self.os)
-            if not os.path.exists(script_alternative):
-                raise Failure("Unsupported flavor %s: %s not found." % (self.flavor, script))
-            else:
-                script = script_alternative
+            raise Failure("Unsupported flavor %s: %s not found." % (self.flavor, script))
 
-        self.unpack_base(modify)
+        if "atomic" in self.os:
+            self.unpack_base(modify_func=None)
+        else:
+            self.unpack_base(modify_func=modify)
         self.message("Running setup script %s" % (script))
         self.run_setup_script(script, args)
         self.run_selinux_relabel()
@@ -706,38 +693,17 @@ class QemuMachine(Machine):
         if not os.path.exists(self.run_dir):
             os.makedirs(self.run_dir, 0750)
 
-        drive_to_start = self._image_root
-        if os.path.exists(self._image_image):
-            drive_to_start = self._image_image
-        elif os.path.exists(self._image_original):
+        if not os.path.exists(self._image_image):
+            self.message("create image from backing file")
             subprocess.check_call([ "qemu-img", "create", "-q",
                                     "-f", "qcow2",
                                     "-o", "backing_file=%s" % self._image_original,
                                     self._image_image ])
-            drive_to_start = self._image_image
-        else:
-            if (not os.path.exists(self._image_root)
-                or not os.path.exists(self._image_kernel)
-                or not os.path.exists(self._image_initrd)):
 
-                backing_file = os.path.join(self.test_data, "images", os.path.basename(self._image_root))
-                kernel_file = os.path.join(self.test_data, "images", os.path.basename(self._image_kernel))
-                initrd_file = os.path.join(self.test_data, "images", os.path.basename(self._image_initrd))
-                if not os.path.exists(backing_file):
-                    raise Failure("Image not found: %s" % backing_file)
-                if not os.path.exists(kernel_file):
-                    raise Failure("Kernel not found: %s" % backing_file)
-                if not os.path.exists(initrd_file):
-                    raise Failure("Initrd not found: %s" % backing_file)
-                subprocess.check_call([ "qemu-img", "create", "-q",
-                                        "-f", "qcow2",
-                                        "-o", "backing_file=%s" % backing_file,
-                                        self._image_root ])
-                subprocess.check_call([ "ln", "-sf", kernel_file, self._image_kernel ])
-                subprocess.check_call([ "ln", "-sf", initrd_file, self._image_initrd ])
+            if os.path.exists(self._iso_original) and not os.path.exists(self._image_additional_iso):
+                shutil.copy(self._iso_original, self._image_additional_iso)
 
-
-        if not self._lock_resource(drive_to_start, exclusive=maintain):
+        if not self._lock_resource(self._image_image, exclusive=maintain):
             raise Failure("Already running this image: %s" % self.image)
 
         if maintain:
@@ -750,23 +716,23 @@ class QemuMachine(Machine):
         cmd = [
             self._locate_qemu_kvm(),
             "-m", str(MEMORY_MB),
-            "-drive", "if=virtio,file=%s,index=0,serial=ROOT,snapshot=%s" % (drive_to_start, snapshot),
+            "-drive", "if=virtio,file=%s,index=0,serial=ROOT,snapshot=%s" % (self._image_image, snapshot),
             "-net", "nic,model=virtio,macaddr=%s" % self.macaddr,
             "-net", "bridge,vlan=0,br=cockpit0",
-            "-device", "virtio-scsi-pci,id=hot"
+            "-device", "virtio-scsi-pci,id=hot",
+            "-nographic"
         ]
-        if drive_to_start == self._image_root:
-            cmd += [
-            "-append", "root=/dev/vda quiet %s" % (selinux, ),
-            "-kernel", self._image_kernel,
-            "-initrd", self._image_initrd
-        ]
+
+        if os.path.exists(self._image_additional_iso):
+            """ load an iso image if one exists with the same basename as the image
+            """
+            cmd += ["-cdrom", self._image_additional_iso]
 
         if monitor:
-            cmd += "-monitor", monitor
+            cmd += ["-monitor", monitor]
 
         if not tty:
-            cmd += "-display", "none"
+            cmd += ["-display", "none"]
 
         self.message(*cmd)
 
@@ -810,7 +776,7 @@ class QemuMachine(Machine):
     # This is a special QEMU specific maintenance console
     def qemu_console(self, snapshot=False):
         try:
-            proc = self._start_qemu(maintain=not snapshot, tty=True)
+            proc = self._start_qemu(maintain=not snapshot, tty=(not os.environ.get("DISPLAY", None) is None))
         except:
             self._cleanup()
             raise
@@ -822,9 +788,10 @@ class QemuMachine(Machine):
             if not os.path.exists(self.run_dir):
                 os.makedirs(self.run_dir, 0750)
 
-            (unused, self._monitor) = tempfile.mkstemp(suffix='.mon', prefix="machine-", dir=self.run_dir)
+            (unused, self._monitor) = tempfile.mkstemp(suffix='.mon', prefix="", dir=self.run_dir)
             self._process = self._start_qemu(maintain=maintain, tty=False,
-                                             monitor="unix:path=%s,server,nowait" % self._monitor)
+                                             monitor="unix:path=%s,server,nowait" % self._monitor
+                                            )
             self._maintaining = maintain
         except:
             self._cleanup()
@@ -894,7 +861,7 @@ class QemuMachine(Machine):
     def shutdown(self):
         assert self._process
         try:
-            if self._process.poll() is None:
+            if not self._process.poll():
                 self._monitor_qemu("system_powerdown")
                 self.wait_poweroff()
         except:
@@ -937,8 +904,28 @@ class QemuMachine(Machine):
 
         self._disks[index] = {
             "path": path,
+            "serial": serial,
             "socket": nbd,
             "proc": proc,
+        }
+
+        return index
+
+    def add_disk_path(self, main_index):
+        index = 1
+        while index in self._disks:
+            index += 1
+
+        file = self._disks[main_index]["path"]
+        serial = self._disks[main_index]["serial"]
+
+        cmd = "drive_add auto file=%s,if=none,serial=%s,id=drive%d,format=raw" % (file, serial, index)
+        output = self._monitor_qemu(cmd)
+
+        cmd = "device_add scsi-disk,bus=hot.0,drive=drive%d,id=device%d" % (index, index)
+        output = self._monitor_qemu(cmd)
+
+        self._disks[index] = {
         }
 
         return index
@@ -958,7 +945,7 @@ class QemuMachine(Machine):
             os.unlink(disk["path"])
         if "socket" in disk and disk["socket"] and os.path.exists(disk["socket"]):
             os.unlink(disk["socket"])
-        if "proc" in disk and disk["proc"] and disk["proc"].poll() is not None:
+        if "proc" in disk and disk["proc"] and disk["proc"].poll() == None:
             disk["proc"].terminate()
 
     def add_netiface(self, mac, vlan=0):
@@ -967,15 +954,14 @@ class QemuMachine(Machine):
         self._monitor_qemu("device_add e1000,vlan=%s,mac=%s" % (vlan,mac));
         return mac
 
+    def needs_writable_usr(self):
+        # On atomic systems, we need a hack to change files in /usr/lib/systemd
+        if "atomic" in self.os:
+            self.execute(command="mount -o remount,rw /usr")
+
 TestMachine = QemuMachine
 
 INSTALL_SCRIPT = """#!/bin/sh
-set -eu
-
-rpm -U --force $TEST_PACKAGES
-
-firewall-cmd --add-service=cockpit --permanent
-
-rm -rf /var/log/journal/*
-rm -rf /var/lib/NetworkManager/dhclient-*.lease
-"""
+export TEST_PACKAGES
+export TEST_VERBOSE
+%s"""

@@ -308,6 +308,11 @@ define([
                         call = realm.Deconfigure(options);
                     }
 
+                    if (!call) {
+                        sub.remove();
+                        return;
+                    }
+
                     call
                         .fail(function(ex) {
                             busy(null);
@@ -375,6 +380,7 @@ define([
             element
                 .addClass("disabled")
                 .attr('title', message)
+                .tooltip({ container: 'body'})
                 .tooltip('fixTitle');
             realmd = null;
         });

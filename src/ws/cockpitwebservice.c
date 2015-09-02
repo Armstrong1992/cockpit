@@ -37,6 +37,7 @@
 #include "cockpitauth.h"
 #include "cockpitws.h"
 
+#include "cockpitsshagent.h"
 #include "cockpitsshtransport.h"
 
 #include "websocket/websocket.h"
@@ -657,6 +658,12 @@ build_control (const gchar *name,
   return message;
 }
 
+static gchar *
+generate_channel_id (CockpitWebService *self)
+{
+  return g_strdup_printf ("0:%d", self->next_internal_id++);
+}
+
 static void
 caller_begin (CockpitWebService *self)
 {
@@ -771,7 +778,14 @@ process_kill (CockpitWebService *self,
       /* Send a close message to both parties */
       payload = build_control ("command", "close", "channel", (gchar *)channel, "problem", "terminated", NULL);
       g_warn_if_fail (process_and_relay_close (self, socket, channel, payload));
-      web_socket_connection_send (socket->connection, WEB_SOCKET_DATA_TEXT, self->control_prefix, payload);
+      if (web_socket_connection_get_ready_state (socket->connection) == WEB_SOCKET_STATE_OPEN)
+        {
+              web_socket_connection_send (socket->connection,
+                                          WEB_SOCKET_DATA_TEXT,
+                                          self->control_prefix,
+                                          payload);
+        }
+
       g_bytes_unref (payload);
 
       g_free (channel);
@@ -1118,6 +1132,7 @@ lookup_or_open_session_for_host (CockpitWebService *self,
                                  gboolean private)
 {
   CockpitSession *session = NULL;
+  CockpitSshAgent *agent = NULL;
   CockpitTransport *transport;
   const gchar *hostname;
 
@@ -1135,6 +1150,22 @@ lookup_or_open_session_for_host (CockpitWebService *self,
           if (cockpit_ws_specific_ssh_port != 0)
             hostname = "127.0.0.1";
         }
+      else
+        {
+          CockpitSession *local = cockpit_session_by_host (&self->sessions,
+                                                           "localhost");
+          if (local->transport)
+            {
+                gchar *next_id = generate_channel_id (self);
+                gchar *channel_id = g_strdup_printf ("ssh-agent%s",
+                                                     next_id);
+                agent = cockpit_ssh_agent_new (local->transport,
+                                               hostname,
+                                               channel_id);
+                g_free (channel_id);
+                g_free (next_id);
+            }
+        }
 
       transport = g_object_new (COCKPIT_TYPE_SSH_TRANSPORT,
                                 "host", hostname,
@@ -1143,6 +1174,7 @@ lookup_or_open_session_for_host (CockpitWebService *self,
                                 "creds", creds,
                                 "known-hosts", cockpit_ws_known_hosts,
                                 "host-key", host_key,
+                                "agent", agent,
                                 NULL);
 
       session = cockpit_session_track (&self->sessions, host, private, creds, transport);
@@ -1150,6 +1182,9 @@ lookup_or_open_session_for_host (CockpitWebService *self,
       session->recv_sig = g_signal_connect_after (transport, "recv", G_CALLBACK (on_session_recv), self);
       session->closed_sig = g_signal_connect_after (transport, "closed", G_CALLBACK (on_session_closed), self);
       g_object_unref (transport);
+
+      if (agent)
+        g_object_unref (agent);
     }
 
   return session;
@@ -1831,12 +1866,6 @@ cockpit_web_service_noauth (GIOStream *io_stream,
 
   /* Unreferences connection when it closes */
   g_signal_connect (connection, "close", G_CALLBACK (g_object_unref), NULL);
-}
-
-static gchar *
-generate_channel_id (CockpitWebService *self)
-{
-  return g_strdup_printf ("0:%d", self->next_internal_id++);
 }
 
 static void

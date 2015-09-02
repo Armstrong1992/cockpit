@@ -81,6 +81,17 @@ html, body {
     cursor: auto;
 }
 
+#dashboard-hosts .spinner {
+    float: left;
+    margin: 6px 13px 4px 3px;
+}
+
+#dashboard-hosts .list-group-item span.reconnecting {
+    color: #888;
+    display: inline;
+    padding-left: 20px;
+}
+
 .host-avatar {
     border-radius: 3px;
     margin-right: 10px;
@@ -102,6 +113,27 @@ html, body {
     text-overflow: ellipsis;
     white-space: nowrap;
 }
+
+#dashboard-hosts .list-group-item div.os {
+    padding-top: 6px;
+    padding-bottom: 4px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    text-align: right;
+    color: #888;
+    float: right;
+}
+
+@media (max-width: 400px) {
+    #dashboard-hosts .list-group-item div.os {
+        display: none;
+    }
+    #dashboard-hosts .list-group-item span.reconnecting {
+        display: none;
+    }
+}
+
 
 .zoom-controls {
     display: none;
@@ -238,175 +270,6 @@ html, body {
     margin-right: 5px;
 }
 
-.available-disks-group input[type='checkbox'],
-.available-interfaces-group input[type='checkbox'] {
-    margin: 4px 4px 4px -20px;
-}
-
-.available-disks-group > .list-group-item,
-.available-interfaces-group > .list-group-item {
-    border: none;
-    padding: 0px;
-}
-
-ul.available-interfaces-group {
-    margin-bottom: 0px;
-}
-
-.cockpit-account {
-    width: 250px;
-    height: 70px;
-    background: #FFF;
-    margin-top: 15px;
-    margin-right: 15px;
-    border: 1px solid #ddd;
-    display: inline-block;
-    box-shadow: 0px 1px 1px rgba(0, 0, 0, 0.05);
-}
-
-.cockpit-account:hover {
-    background-color: #d4edfa;
-    cursor: pointer;
-}
-
-.cockpit-account > .cockpit-account-pic {
-    width: 48px;
-    height: 48px;
-    font-size: 48px;
-    color: #bebebe;
-    margin: 10px;
-    float: left;
-}
-
-.cockpit-account > .cockpit-account-real-name {
-    padding-top: 10px;
-    font-weight: bold;
-    overflow: hidden;
-    white-space: nowrap;
-    text-overflow: ellipsis;
-    min-height: 30px;
-}
-
-.cockpit-account > .cockpit-account-user-name {
-    overflow: hidden;
-    text-overflow: ellipsis;
-}
-
-#account table {
-    margin-top: 50px;
-}
-
-#account td:first-child {
-    text-align: right;
-    color: #888;
-    padding: 10px;
-}
-
-#account td {
-    padding: 10px;
-}
-
-#dashboard_setup_address_discovered li:hover {
-    background-color: #d4edfa;
-}
-
-#account-pic {
-    background: #d3d7cf;
-    border-radius: 5px;
-    cursor: pointer;
-}
-
-/* Align with the top of the graphs
-  only when not wrapped
-*/
-@media (min-width: 1200px) {
-  #containers-storage {
-    margin-top: 19px;
-  }
-}
-
-#containers-storage {
-    padding: 8px 15px 8px 15px;
-    overflow: hidden;
-}
-
-#containers-storage .bar-row {
-    min-width: 50px;
-    vertical-align: middle;
-}
-
-#containers-storage .bar-group {
-    min-width: 150px;
-    overflow: hidden;
-}
-
-#containers-storage .bar {
-    overflow: hidden;
-    vertical-align: bottom;
-}
-
-#containers-storage .data {
-    float: right;
-    max-height: 4em;
-    vertical-align: bottom;
-    padding-left: 8px;
-}
-
-#containers-storage .storage-label {
-    max-height: 4em;
-    float: left;
-    padding-right: 8px;
-}
-
-.container-col-name {
-    width: 20%;
-}
-
-.container-col-image {
-    width: 20%;
-}
-
-.container-col-command {
-    width: 15%;
-}
-
-.container-col-cpu {
-    width: 10%;
-    text-align: right;
-}
-
-.container-col-memory-graph {
-    width: 15%;
-}
-
-.container-col-memory-text {
-    width: 10%;
-}
-
-#image-details-containers .container-col-actions,
-#containers .container-col-actions {
-    vertical-align: top;
-    padding-top: 4px;
-    padding-bottom: 4px;
-}
-
-#image-details-containers .cell-buttons,
-#image-details-containers .table > tbody > tr > .cell-buttons,
-#containers .cell-buttons,
-#containers .table > tbody > tr > .cell-buttons {
-    width: auto;
-}
-
-#image-details-containers .cell-buttons button,
-#image-details-containers .table > tbody > tr > .cell-buttons button,
-#containers .cell-buttons button,
-#containers .table > tbody > tr > .cell-buttons button {
-    position: absolute;
-    right: 30px;
-    width: 28px;
-    height: 28px;
-}
-
 /*
  * The oops status in the navbar, used when an unhandled exception
  * occurs.
@@ -506,17 +369,6 @@ ul.available-interfaces-group {
     cursor: auto;
 }
 
-.ipv4-address {
-  display: inline;
-}
-
-.ipv4-address input {
-  width: 2em;
-  background: none;
-  border: none;
-  text-align: center;
-}
-
 /* server overview dashboard */
 #server .cockpit-info-table button {
   max-width: 300px;
@@ -550,155 +402,16 @@ ul.available-interfaces-group {
   }
 }
 
-#containers-search-image-dialog .modal-body {
-    height: 340px;
-}
-
-#containers-search-image-results {
-    height: 300px;
-    overflow-y: scroll;
-    border: 1px solid #BABABA;
-    margin-top: 10px;
-}
-
-#containers-search-image-results tr.active td {
-    background-color: #f5f9fc;
-}
-
-#containers-search-image-search {
-    padding-left: 25px;
-}
-
-#containers-search-image-dialog .containers-search-image-search-icon {
-    left: 0;
-    top: 0;
-}
-
-#containers-search-image-waiting.spinner {
-    margin: auto;
-    margin-top: 150px;
-}
-
-#containers-search-image-no-results {
-    margin: auto;
-    margin-top: 100px;
+#connecting {
+    height: 100%;
+    background-color: #eeeeec;
     text-align: center;
-}
-
-#containers-search-tag {
-    width: 200px;
-    float: left;
-}
-
-#containers #containers-containers .table,
-#containers #containers-images .table {
-    table-layout: fixed;
-}
-
-#containers #containers-containers .table th,
-#containers #containers-containers .table td,
-#containers #containers-images .table th,
-#containers #containers-images .table td {
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-}
-
-.image-col-tags {
-    width: 40%;
-}
-
-.image-col-created {
-    width: 30%;
-}
-
-.image-col-size-text {
-    width: 15%;
-}
-
-#containers_run_image_dialog td {
-    vertical-align: top;
+    padding-top: 120px;
 }
 
 /* workaround: make text red for select if contained in has-error, not in patternfly */
 .has-error > .bootstrap-select > button > span {
     color: #A94442;
-}
-
-.containers-run-inline {
-    margin-left: 8px;
-}
-
-.containers-run-inline form .pficon-close,
-.containers-run-inline form .fa-plus {
-    height: 26px;
-    width: 26px;
-    padding: 4px;
-    float: right;
-    margin-left: 5px;
-}
-
-.containers-run-inline .form-inline {
-    background: #f4f4f4;
-    border-width: 0 1px 1px 1px;
-    border-style: solid;
-    border-color: #bababa;
-    padding: 4px;
-}
-
-.containers-run-inline .form-inline:first-of-type {
-    border-top: 1px solid #bababa;
-}
-
-.containers-run-inline .form-control {
-  margin: 0 4px;
-}
-
-.containers-run-inline .form-group:first-of-type .form-control {
-  margin: 0 4px 0 0;
-}
-
-.containers-run-portmapping input {
-    max-width: 5em;
-}
-
-#select-linked-containers .form-group {
-    width: 80%;
-}
-
-#select-linked-containers label {
-    padding-right: 4px;
-    padding-left: 4px;
-}
-
-@media (min-width: 768px) {
-  #select-linked-containers .form-group {
-      width: 40%;
-  }
-  #select-linked-containers input {
-      max-width: 73%;
-  }
-}
-
-/* Hack to remove size column */
-.image-col-size-graph {
-    display: none !important;
-}
-
-/* networking */
-
-.network-number-field {
-    width: 4em;
-}
-
-.network-ip-settings-row {
-    border-bottom: 1px solid lightgray;
-    padding-bottom: 10px;
-}
-
-.network-ip-settings-row:last-of-type {
-    border-bottom: none;
-    padding-bottom: 0;
 }
 
 /* System information */
@@ -707,106 +420,6 @@ ul.available-interfaces-group {
     padding:0px;
     padding-top:15px;
     border: none;
-}
-
-/* Storage */
-#storage {
-    padding-top: 20px;
-    padding-left: 5px;
-    padding-right: 5px;
-}
-
-#storage .storage-mounts .table {
-    table-layout: fixed;
-}
-
-#storage .storage-mounts .table th,
-#storage .storage-mounts .table td {
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-@media (min-width: 992px) {
-    .storage-mounts .mount-name {
-        width: 25%;
-    }
-    .storage-mounts .mount-point {
-        width: 25%;
-    }
-    .storage-mounts .mount-size-graph {
-        width: 25%;
-    }
-    .storage-mounts .mount-size-number {
-        width: 25%;
-    }
-}
-
-@media (min-width: 1200px) {
-    .storage-mounts .mount-name {
-        width: 20%;
-    }
-    .storage-mounts .mount-point {
-        width: 20%;
-    }
-    .storage-mounts .mount-size-graph {
-        width: 45%;
-    }
-    .storage-mounts .mount-size-number {
-        width: 15%;
-    }
-}
-
-@media (max-width: 1814px) {
-    #storage .storage-disk-size {
-        width: 100%;
-    }
-}
-
-#storage .create-storage {
-    margin-bottom: 10px;
-}
-
-@media (max-width: 1560px) {
-    #storage .create-storage .col-lg-6 {
-        width: 100%;
-    }
-}
-
-#storage_create_raid,
-#storage_create_volume_group {
-    margin-bottom: 5px;
-    width: 100%;
-    overflow: hidden;
-    text-overflow: ellipsis;
-}
-
-#storage .storage-sidebar .table {
-    table-layout:fixed;
-}
-
-#storage .storage-sidebar .table td {
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-}
-
-#storage_raids .row span,
-#storage_vgs .row span,
-#storage_drives .row span {
-    padding: 0;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-}
-
-#storage_raids .row span.raid-size,
-#storage_vgs .row span.vg-size {
-    text-align: right;
-}
-
-#storage .storage-sidebar .storage-disk-size {
-    padding-right: 5px;
 }
 
 #shutdown-dialog td {
@@ -908,6 +521,11 @@ ul.available-interfaces-group {
 
 .nomargin {
    margin: 0;
+}
+
+.nomargin-sides {
+   margin-left: 0;
+   margin-right: 0;
 }
 
 iframe.container-frame {

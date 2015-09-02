@@ -35,12 +35,26 @@ import traceback
 import exceptions
 import re
 import json
+import signal
+import tempfile
 import unittest
 try:
     import testvm
 except ImportError:
     print "Unable to import testvm, probably new test struture?"
     pass
+
+class Timeout:
+    def __init__(self, seconds=1, error_message='Timeout'):
+        self.seconds = seconds
+        self.error_message = error_message
+    def handle_timeout(self, signum, frame):
+        raise Exception(self.error_message)
+    def __enter__(self):
+        signal.signal(signal.SIGALRM, self.handle_timeout)
+        signal.alarm(self.seconds)
+    def __exit__(self, type, value, traceback):
+        signal.alarm(0)
 
 __all__ = (
     # Test definitions
@@ -126,10 +140,7 @@ class Browser:
         self.init_after_load()
 
     def init_after_load(self):
-        # Prevent sizzle from registering with AMD loader, and also claiming the usual global name
-        with open("%s/sizzle.js" % topdir) as file:
-            js = "var define = null; " + file.read()
-            self.phantom.do(js)
+        self.phantom.inject("%s/sizzle.js" % topdir)
         self.phantom.inject("%s/phantom-lib.js" % topdir)
         self.phantom.do("ph_init()")
 
@@ -140,7 +151,7 @@ class Browser:
         self.init_after_load()
 
     def expect_reload(self):
-        self.phantom.expect_reload()
+        self.phantom.expect_reload(self.phantom_wait_timeout)
         self.init_after_load()
 
     def switch_to_frame(self, name):
@@ -212,6 +223,9 @@ class Browser:
     def wait_js_func(self, func, *args):
         return self.phantom.wait("%s(%s)" % (func, ','.join(map(jsquote, args))), timeout=self.phantom_wait_timeout)
 
+    def is_present(self, selector):
+        return self.call_js_func('ph_is_present', selector)
+
     def wait_present(self, selector):
         return self.wait_js_func('ph_is_present', selector)
 
@@ -270,6 +284,15 @@ class Browser:
             id: The 'id' attribute of the popup.
         """
         self.wait_not_visible('#' + id)
+
+    def arm_timeout(self):
+        return self.phantom.arm_timeout(timeout=self.phantom_wait_timeout)
+
+    def disarm_timeout(self):
+        return self.phantom.disarm_timeout()
+
+    def wait_checkpoint(self):
+        return self.phantom.wait_checkpoint()
 
     def dialog_complete(self, sel, button=".btn-primary", result="hide"):
         self.click(sel + " " + button)
@@ -386,9 +409,9 @@ class MachineCase(unittest.TestCase):
     machine = None
     machines = [ ]
 
-    def new_machine(self, flavor=None):
+    def new_machine(self, flavor=None, system=None):
         (unused, sep, label) = self.id().rpartition(".")
-        m = self.machine_class(verbose=arg_trace, flavor=flavor, label="%s-%s" % (program_name, label))
+        m = self.machine_class(verbose=arg_trace, flavor=flavor, system=system, label="%s-%s" % (program_name, label))
         self.addCleanup(lambda: m.kill())
         self.machines.append(m)
         return m
@@ -402,32 +425,83 @@ class MachineCase(unittest.TestCase):
         self.machine.start()
         self.machine.wait_boot()
         self.browser = self.new_browser()
+        self.tmpdir = tempfile.mkdtemp()
 
     def tearDown(self):
         if self.runner and not self.runner.wasSuccessful():
             self.snapshot("FAIL")
             self.copy_journal("FAIL")
             if arg_sit_on_failure:
+                for f in self.runner.failures:
+                    print >> sys.stderr, f[1]
+                for e in self.runner.errors:
+                    print >> sys.stderr, e[1]
                 print >> sys.stderr, "ADDRESS: %s" % self.machine.address
                 sit()
         elif self.machine.address:
             self.check_journal_messages()
+        shutil.rmtree(self.tmpdir)
 
-    def start_cockpit(self):
+    def wait_for_cockpit_running(self, atomic_wait_for_host="localhost"):
+        """Wait until cockpit is running.
+
+        We only need to do this on atomic systems.
+        On other systems, systemctl blocks until the service is actually running.
+        """
+        if not "atomic" in self.machine.os or not atomic_wait_for_host:
+            return
+        WAIT_COCKPIT_RUNNING = """#!/bin/sh
+until curl -s --connect-timeout 1 http://%s:9090 >/dev/null; do
+    sleep 0.5;
+done;
+""" % (atomic_wait_for_host)
+        with Timeout(seconds=30, error_message="Timeout while waiting for cockpit/ws to start"):
+            self.machine.execute(script=WAIT_COCKPIT_RUNNING)
+
+    def start_cockpit(self, atomic_wait_for_host="localhost"):
         """Start Cockpit.
 
         Cockpit is not running when the test virtual machine starts up, to
         allow you to make modifications before it starts.
         """
-        self.machine.execute("systemctl start cockpit-testing.socket")
+        if "atomic" in self.machine.os:
+            # HACK: https://bugzilla.redhat.com/show_bug.cgi?id=1228776
+            # we want to run:
+            # self.machine.execute("atomic run cockpit/ws --no-tls")
+            # but atomic doesn't forward the parameter, so we use the resulting command
+            # also we need to wait for cockpit to be up and running
+            RUN_COCKPIT_CONTAINER = """#!/bin/sh
+systemctl start docker
+/usr/bin/docker run -d --privileged --pid=host -v /:/host cockpit/ws /container/atomic-run --local-ssh --no-tls
+"""
+            with Timeout(seconds=30, error_message="Timeout while waiting for cockpit/ws to start"):
+                self.machine.execute(script=RUN_COCKPIT_CONTAINER)
+                self.wait_for_cockpit_running(atomic_wait_for_host)
+        else:
+            self.machine.execute("systemctl start cockpit-testing.socket")
+
+    def restart_cockpit(self):
+        """Restart Cockpit.
+        """
+        if "atomic" in self.machine.os:
+            with Timeout(seconds=30, error_message="Timeout while waiting for cockpit/ws to restart"):
+                self.machine.execute("docker restart `docker ps | grep cockpit/ws | awk '{print $1;}'`")
+                self.wait_for_cockpit_running()
+        else:
+            self.machine.execute("systemctl restart cockpit-testing.socket")
 
     def login_and_go(self, page, href=None, user=None, host="localhost"):
-        self.start_cockpit()
+        self.start_cockpit(host)
         self.browser.login_and_go(page, href=href, user=user, host=host)
 
     allowed_messages = [
         # This is a failed login, which happens every time
         "Returning error-response 401 with reason `Sorry'",
+
+        # Reauth stuff
+        '.*Reauthorizing unix-user:.*',
+        '.*user .* was reauthorized',
+        'cockpit-polkit helper exited with status: 0',
 
         # Reboots are ok
         "-- Reboot --",
@@ -440,20 +514,8 @@ class MachineCase(unittest.TestCase):
         # Will go away with glib 2.43.2
         ".*: couldn't write web output: Error sending data: Connection reset by peer",
 
-        ## Bugs
-
-        # https://bugs.freedesktop.org/show_bug.cgi?id=70540
-        ".*ActUserManager: user .* has no username.*",
-
-        # https://github.com/cockpit-project/cockpit/issues/48
-        "Failed to load '.*': Key file does not have group 'Unit'",
-
-        # https://github.com/cockpit-project/cockpit/issues/115
-        "cockpit-testing\\.service: main process exited, code=exited, status=1/FAILURE",
-        "Unit cockpit-testing\\.service entered failed state\\.",
-
-        # https://bugs.freedesktop.org/show_bug.cgi?id=71092
-        "logind\\.KillUser failed \\(Input/output error\\), trying systemd\\.KillUnit",
+        # pam_lastlog outdated complaints
+        ".*/var/log/lastlog: No such file or directory",
 
         # SELinux messages to ignore
         "(audit: )?type=1403 audit.*",
@@ -471,12 +533,25 @@ class MachineCase(unittest.TestCase):
                                     "g_dbus_connection_real_closed: Remote peer vanished with error: Underlying GIOStream returned 0 bytes on an async read \\(g-io-error-quark, 0\\). Exiting.",
                                     # HACK: https://bugzilla.redhat.com/show_bug.cgi?id=1141137
                                     "localhost: bridge program failed: Child process killed by signal 9",
-                                    "request timed out, closing")
+                                    "request timed out, closing",
+                                    "PolicyKit daemon disconnected from the bus.",
+                                    "We are no longer a registered authentication agent."
+                                    )
+
+    def allow_authorize_journal_messages(self):
+        self.allow_journal_messages("cannot reauthorize identity.*:.*unix-user:admin.*",
+                                    "Error executing command as another user: Not authorized",
+                                    "This incident has been reported.",
+                                    ".*: a password is required",
+                                    "user user was reauthorized",
+                                    ".*: sorry, you must have a tty to run sudo"
+                                    )
+
 
     def check_journal_messages(self, machine=None):
         """Check for unexpected journal entries."""
         machine = machine or self.machine
-        syslog_ids = [ "cockpit-wrapper", "cockpit-ws" ]
+        syslog_ids = [ "cockpit-ws", "cockpit-bridge" ]
         messages = machine.journal_messages(syslog_ids, 5)
         messages += machine.audit_messages("14") # 14xx is selinux
         all_found = True
@@ -522,7 +597,7 @@ class Phantom:
         if lang:
             environ["LC_ALL"] = lang
         self.driver = subprocess.Popen([ "%s/phantom-driver" % topdir ], env=environ,
-                                       stdout=subprocess.PIPE, stdin=subprocess.PIPE)
+                                       stdout=subprocess.PIPE, stdin=subprocess.PIPE, close_fds=True)
         self.frame = None
 
     def run(self, args):
@@ -550,8 +625,8 @@ class Phantom:
         if status != "success":
             raise Error(status)
 
-    def expect_reload(self):
-        status = self.run({'cmd': 'expect-reload'})
+    def expect_reload(self, timeout):
+        status = self.run({'cmd': 'expect-reload', 'timeout': timeout*1000})
         if status != "success":
             raise Error(status)
 
@@ -574,6 +649,15 @@ class Phantom:
     def wait(self, cond, timeout):
         return self.run({'cmd': 'wait', 'cond': cond, 'timeout': timeout*1000})
 
+    def arm_timeout(self, timeout):
+        return self.run({'cmd': 'armtimeout', 'timeout': timeout*1000 })
+
+    def disarm_timeout(self):
+        return self.run({'cmd': 'disarmtimeout' })
+
+    def wait_checkpoint(self):
+        return self.run({'cmd': 'waitcheckpoint' })
+
     def show(self, file="page.png"):
         if not self.run({'cmd': 'show', 'file': file}):
             raise "failed"
@@ -583,6 +667,7 @@ class Phantom:
         self.run({'cmd': 'keys', 'type': type, 'keys': keys })
 
     def quit(self):
+        self.run({'cmd': 'ping'})
         self.driver.stdin.close()
         self.driver.wait()
 
@@ -700,10 +785,7 @@ def sit():
     The current test case is suspended so that the user can inspect
     the browser.
     """
-    sys.stdout.write("Press Ctrl-C to continue... ")
-    sys.stdout.flush()
-    while True:
-        sleep(60)
+    raw_input ("Press RET to continue... ")
 
 def merge(*args):
     return dict(reduce(lambda x,y: x + y, map(lambda d: d.items(), args), [ ]))

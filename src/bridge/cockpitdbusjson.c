@@ -53,7 +53,6 @@ typedef struct {
   guint name_watch;
   gboolean name_watched;
   gboolean name_appeared;
-  gboolean name_track;
 
   /* Call related */
   GCancellable *cancellable;
@@ -1808,18 +1807,30 @@ cockpit_dbus_json_init (CockpitDBusJson *self)
 }
 
 static void
+send_owned (CockpitDBusJson *self,
+            const gchar *owner)
+{
+  JsonObject *object;
+  object = json_object_new ();
+  json_object_set_string_member (object, "owner", owner);
+  send_json_object (self, object);
+  json_object_unref (object);
+}
+
+static void
 on_name_appeared (GDBusConnection *connection,
                   const gchar *name,
                   const gchar *name_owner,
                   gpointer user_data)
 {
   CockpitDBusJson *self = COCKPIT_DBUS_JSON (user_data);
-
   if (!self->name_appeared)
     {
       self->name_appeared = TRUE;
       cockpit_channel_ready (COCKPIT_CHANNEL (self));
     }
+
+  send_owned (self, name_owner);
 }
 
 static void
@@ -1830,12 +1841,12 @@ on_name_vanished (GDBusConnection *connection,
   CockpitDBusJson *self = COCKPIT_DBUS_JSON (user_data);
   CockpitChannel *channel = COCKPIT_CHANNEL (self);
 
+  send_owned (self, NULL);
+
   if (!G_IS_DBUS_CONNECTION (connection) || g_dbus_connection_is_closed (connection))
     cockpit_channel_close (channel, "disconnected");
   else if (!self->name_appeared)
     cockpit_channel_close (channel, "not-found");
-  else if (self->name_track)
-    cockpit_channel_close (channel, NULL);
 }
 
 static void
@@ -1918,11 +1929,6 @@ cockpit_dbus_json_prepare (CockpitChannel *channel)
   if (!cockpit_json_get_string (options, "bus", NULL, &bus))
     {
       g_warning ("invalid \"bus\" option in dbus channel");
-      goto out;
-    }
-  if (!cockpit_json_get_bool (options, "track", FALSE, &self->name_track))
-    {
-      g_warning ("invalid \"track\" option in dbus channel");
       goto out;
     }
 

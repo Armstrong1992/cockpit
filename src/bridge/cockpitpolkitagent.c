@@ -376,7 +376,7 @@ cockpit_polkit_agent_initiate_authentication (PolkitAgentListener *listener,
 
   caller = g_new0 (ReauthorizeCaller, 1);
   caller->cookie = g_strdup (cookie);
-  caller->helper = cockpit_pipe_spawn (argv, NULL, NULL, COCKPIT_PIPE_STDERR_TO_LOG);
+  caller->helper = cockpit_pipe_spawn (argv, NULL, NULL, COCKPIT_PIPE_FLAGS_NONE);
   caller->read_sig = g_signal_connect (caller->helper, "read", G_CALLBACK (on_helper_read), caller);
   caller->close_sig = g_signal_connect (caller->helper, "close", G_CALLBACK (on_helper_close), caller);
 
@@ -515,6 +515,13 @@ out:
 void
 cockpit_polkit_agent_unregister (gpointer handle)
 {
+  guint handler = 0;
+
+  /* Everything is shutting down at this point, prevent polkit from complaining */
+  handler = g_log_set_handler (NULL, G_LOG_LEVEL_WARNING, cockpit_null_log_handler, NULL);
+
   if (handle)
     polkit_agent_listener_unregister (handle);
+
+  g_log_remove_handler (NULL, handler);
 }

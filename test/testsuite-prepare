@@ -2,15 +2,40 @@
 
 set -e
 
-create_images=
 make_rpms_opts=
+cockpit_create_opts=
+install_selinux=yes
+install_opts=
 
+usage()
+{
+    echo "usage: testsuite-prepare [--clean] [--quick] [--verbose]"
+}
+
+
+args=$(getopt -o "h,v,c,q" -l "help,verbose,clean,quick" -- "$@")
+eval set -- "$args"
 while [ $# -gt 0 ]; do
     case $1 in
-	--clean)
-	    create_images=t
-            make_rpms_opts="--clean"
-	    ;;
+    -c|--clean)
+        mock_rpms_opts="$mock_rpms_opts --clean"
+        cockpit_create_opts="--force --no-save"
+        install_selinux=no
+        ;;
+    -q|--quick)
+        mock_rpm_opts="$mock_rpm_opts --quick"
+        ;;
+    -v|--verbose)
+        install_opts="$install_opts -v"
+        ;;
+    -h|--help)
+        usage
+        exit 0
+        ;;
+    --)
+        shift
+        break
+        ;;
     esac
     shift
 done
@@ -37,25 +62,30 @@ if ! silent $IP address show dev cockpit0; then
   sudo ./vm-prep
 fi
 
-if [ -z "$create_images" ]; then
-    ./vm-download -f cockpit
-    ./vm-download -f ipa
-fi
-
 skip="cockpit-doc-
 cockpit-debuginfo"
+
+if [ "$TEST_OS" == "rhel-7" ]; then
+    skip="$skip
+cockpit-kubernetes"
+fi
+
+if [ "$install_selinux" == "no" ]; then
+    skip="$skip
+cockpit-selinux"
+fi
 
 rpms=$(../tools/make-rpms $make_rpms_opts | grep -vF "$skip")
 if [ -z "$rpms" ]; then
   exit 1
 fi
 
-if [ -n "$create_images" ]; then
-    ./vm-reset
-    ./vm-create -v -f cockpit
-    unset TEST_DATA
-    ./vm-save -f cockpit
-fi
-
 ./vm-reset
-./vm-install -f cockpit $rpms
+./vm-create -v -f cockpit $cockpit_create_opts
+./vm-create -v -f ipa
+./vm-create -v -f openshift
+
+TEST_OS=fedora-22 ./vm-create -v -f stock
+TEST_OS=centos-7  ./vm-create -v -f stock
+
+./vm-install $install_opts -f cockpit $rpms

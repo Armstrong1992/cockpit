@@ -1,0 +1,127 @@
+#!/usr/bin/python
+# -*- coding: utf-8 -*-
+
+# This file is part of Cockpit.
+#
+# Copyright (C) 2013 Red Hat, Inc.
+#
+# Cockpit is free software; you can redistribute it and/or modify it
+# under the terms of the GNU Lesser General Public License as published by
+# the Free Software Foundation; either version 2.1 of the License, or
+# (at your option) any later version.
+#
+# Cockpit is distributed in the hope that it will be useful, but
+# WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+# Lesser General Public License for more details.
+#
+# You should have received a copy of the GNU Lesser General Public License
+# along with Cockpit; If not, see <http://www.gnu.org/licenses/>.
+
+from testlib import *
+
+import socket
+import time
+
+def inject_extras(browser):
+    browser.eval_js("""
+    dashboard_addresses = function () {
+       var addresses = $('#dashboard-hosts .list-group-item').map(function(i,e) { return $(e).data("address"); }).get();
+       return addresses;
+    }
+    """)
+
+def wait_dashboard_addresses(b, expected):
+    b.wait_js_func(
+        """(function (expected) {
+        return expected.sort().toString() == dashboard_addresses().sort().toString();
+        })""", expected)
+
+def add_machine(b, address):
+    b.click('#dashboard-add')
+    b.wait_popup('dashboard_setup_server_dialog')
+    b.set_val('#dashboard_setup_address', address)
+    b.wait_text('#dashboard_setup_next', "Next")
+    b.click('#dashboard_setup_next')
+    b.wait_text('#dashboard_setup_next', "Add host")
+    b.click('#dashboard_setup_next')
+    b.wait_text('#dashboard_setup_next', "Close")
+    b.click('#dashboard_setup_next')
+    b.wait_popdown('dashboard_setup_server_dialog')
+
+def test_spawn(b, address):
+    b.call_js_func("""(function (address) {
+      window.test_result = null;
+      cockpit.spawn([ "echo", "hi" ], { host: address }).
+        done(function (data) {
+          window.test_result = data;
+        }).
+        fail(function (error) {
+          console.log(error);
+        });
+    })""", address)
+
+    b.wait_js_func("(function (expected) { return window.test_result == expected; })",
+                   "hi\n")
+
+def test_dbus(b, address):
+    b.call_js_func("""(function (address) {
+      window.test_result = null;
+      var p = cockpit.dbus("org.freedesktop.DBus", { host: address }).proxy("org.freedesktop.DBus", "/");
+      p.wait(function () {
+        if (p.valid)
+          p.GetId().
+            done(function (id) {
+              window.test_result = id;
+            });
+      });
+    })""", address)
+
+    b.wait_js_func("(function () { return window.test_result != null; })");
+
+
+class TestMultiOS(MachineCase):
+    def testBasic(self):
+        dev_m = self.machine
+        dev_b = self.browser
+
+        self.allow_journal_messages(".*: .* host key for server is not known: .*")
+
+        self.login_and_go("dashboard", href="dashboard/list", host=None)
+        inject_extras(dev_b)
+
+        dev_dashboard_addresses = [ "localhost" ]
+        wait_dashboard_addresses (dev_b, dev_dashboard_addresses)
+
+        def test_stock(system):
+            stock_m = self.new_machine(flavor='stock', system=system)
+            stock_m.start()
+            stock_m.wait_boot()
+            stock_b = self.new_browser(stock_m.address)
+
+            stock_b.login_and_go("dashboard", href="/dashboard/list", host=None)
+            inject_extras(stock_b)
+            wait_dashboard_addresses (stock_b, [ "localhost" ])
+
+            add_machine(stock_b, dev_m.address)
+            wait_dashboard_addresses (stock_b, [ "localhost", dev_m.address ])
+
+            add_machine(dev_b, stock_m.address)
+            dev_dashboard_addresses.append(stock_m.address)
+            wait_dashboard_addresses (dev_b, dev_dashboard_addresses)
+
+            test_dbus(stock_b, dev_m.address)
+            test_dbus(dev_b, stock_m.address)
+
+            test_spawn(stock_b, dev_m.address)
+            test_spawn(dev_b, stock_m.address)
+
+        test_stock('fedora-22')
+        test_stock('centos-7')
+
+        # Messages from previous versions of cockpit
+        self.allow_journal_messages("g_hash_table_iter_next: assertion 'ri->version == ri->hash_table->version' failed")
+        self.allow_journal_messages("couldn't run usermod command: Child process exited with code 6")
+        self.allow_journal_messages("usermod: user 'postfix' does not exist")
+
+test_main()

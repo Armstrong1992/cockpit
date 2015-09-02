@@ -42,7 +42,6 @@
 #include "common/cockpitpipetransport.h"
 #include "common/cockpitunixfd.h"
 
-#include <sys/prctl.h>
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -50,6 +49,8 @@
 #include <pwd.h>
 
 #include <glib-unix.h>
+#include <glib/gstdio.h>
+#include <gio/gunixsocketaddress.h>
 
 
 /* This program is run on each managed server, with the credentials
@@ -118,7 +119,6 @@ process_open (CockpitTransport *transport,
   CockpitChannel *channel;
   GType channel_type;
   const gchar *payload;
-  gchar **capabilities = NULL;
   gint i;
 
   if (!channel_id)
@@ -130,22 +130,6 @@ process_open (CockpitTransport *transport,
     {
       g_warning ("Caller tried to reuse a channel that's already in use");
       cockpit_transport_close (transport, "protocol-error");
-    }
-
-  /*
-   * No capabilities are supported yet. When the first one arrives
-   * we'll add code to process it.
-   */
-
-  else if (!cockpit_json_get_strv (options, "capabilities", NULL, &capabilities))
-    {
-      g_message ("got invalid capabilities field in init message");
-      cockpit_transport_close (transport, "protocol-error");
-    }
-  else if (capabilities && capabilities[0])
-    {
-      g_message ("unsupported capability required: %s", capabilities[0]);
-      cockpit_transport_close (transport, "not-supported");
     }
 
   else
@@ -174,8 +158,6 @@ process_open (CockpitTransport *transport,
       g_hash_table_insert (channels, g_strdup (channel_id), channel);
       g_signal_connect (channel, "closed", G_CALLBACK (on_channel_closed), NULL);
     }
-
-  g_free (capabilities);
 }
 
 static gboolean
@@ -256,6 +238,8 @@ send_init_command (CockpitTransport *transport)
     json_object_set_string_member (object, "bridge-dbus-name", name);
 
   bytes = cockpit_json_write_bytes (object);
+  json_object_unref (object);
+
   cockpit_transport_send (transport, NULL, bytes);
   g_bytes_unref (bytes);
 }
@@ -263,6 +247,7 @@ send_init_command (CockpitTransport *transport)
 static void
 setup_dbus_daemon (gpointer addrfd)
 {
+  g_unsetenv ("G_DEBUG");
   cockpit_unix_fd_close_all (3, GPOINTER_TO_INT (addrfd));
 }
 
@@ -418,14 +403,27 @@ run_bridge (const gchar *interactive)
   CockpitPortal *super = NULL;
   CockpitPortal *pcp = NULL;
   gpointer polkit_agent = NULL;
+  const gchar *directory;
   struct passwd *pwd;
   GPid daemon_pid = 0;
   guint sig_term;
   guint sig_int;
   int outfd;
   uid_t uid;
+  const gchar *ssh_auth_sock;
+  GSocketAddress *auth_address = NULL;
 
   cockpit_set_journal_logging (G_LOG_DOMAIN, !isatty (2));
+
+  /*
+   * The bridge always runs from within $XDG_RUNTIME_DIR
+   * This makes it easy to create user sockets and/or files.
+   */
+  directory = g_get_user_runtime_dir ();
+  if (g_mkdir_with_parents (directory, 0700) < 0)
+    g_warning ("couldn't create runtime dir: %s: %s", directory, g_strerror (errno));
+  else if (g_chdir (directory) < 0)
+    g_warning ("couldn't change to runtime dir: %s: %s", directory, g_strerror (errno));
 
   /* Always set environment variables early */
   uid = geteuid();
@@ -485,6 +483,15 @@ run_bridge (const gchar *interactive)
       super = cockpit_portal_new_superuser (transport);
     }
 
+  ssh_auth_sock = g_getenv ("SSH_AUTH_SOCK");
+  if (ssh_auth_sock != NULL && ssh_auth_sock[0] != '\0')
+      auth_address = g_unix_socket_address_new (ssh_auth_sock);
+
+  cockpit_channel_internal_address ("ssh-agent", auth_address);
+
+  if (auth_address)
+      g_object_unref (auth_address);
+
   pcp = cockpit_portal_new_pcp (transport);
 
   cockpit_dbus_time_startup ();
@@ -508,6 +515,7 @@ run_bridge (const gchar *interactive)
     cockpit_polkit_agent_unregister (polkit_agent);
   if (super)
     g_object_unref (super);
+
   g_object_unref (pcp);
   g_object_unref (transport);
   g_hash_table_destroy (channels);

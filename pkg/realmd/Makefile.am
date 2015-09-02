@@ -4,7 +4,7 @@ realmd_DATA = \
 	pkg/realmd/manifest.json \
 	$(NULL)
 
-realmddebugdir = $(DBGDIR)$(realmddir)
+realmddebugdir = $(debugdir)$(realmddir)
 realmddebug_DATA = \
 	pkg/realmd/bundle.js \
 	pkg/realmd/operation.js \
@@ -26,6 +26,7 @@ TESTS += $(realmd_TESTS)
 
 CLEANFILES += \
 	pkg/realmd/bundle.min.js \
+	pkg/realmd/operation.min.js \
 	$(systed_BUNDLE) \
 	$(NULL)
 

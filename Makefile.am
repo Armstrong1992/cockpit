@@ -2,7 +2,8 @@ NULL =
 man_MANS =
 BUILT_SOURCES =
 EXTRA_DIST = README.md branding
-CLEANFILES = *.js *.min.js *.ok */*.ok */*/*.ok *.html *.css
+CLEANFILES = $(man_MANS)
+DISTCLEANFILES =
 bin_PROGRAMS =
 check_SCRIPTS =
 check_PROGRAMS =
@@ -29,6 +30,9 @@ V_GZIP_ = $(V_GZIP_$(AM_DEFAULT_VERBOSITY))
 V_GZIP_0 = @echo "  GZIP    " $@;
 
 MV = mv -f
+
+JSMODULE = $(srcdir)/tools/missing $(srcdir)/tools/jsmodule
+CSSBUNDLE = $(srcdir)/tools/missing $(srcdir)/tools/cssbundle
 
 .css.min.css:
 	@$(MKDIR_P) $(dir $@)
@@ -91,10 +95,12 @@ AM_CPPFLAGS = \
 LOG_DRIVER = $(top_srcdir)/tools/tap-driver
 LOG_COMPILER = $(top_srcdir)/tools/tap-gtester
 
-TEST_EXTENSIONS = .html
+TEST_EXTENSIONS = .html .sh
+SH_LOG_DRIVER = $(top_srcdir)/tools/tap-driver
 HTML_LOG_DRIVER = $(top_srcdir)/tools/tap-driver
+HTML_TEST_SERVER = $(builddir)/test-server
 if WITH_PHANTOMJS
-HTML_LOG_COMPILER = $(top_srcdir)/tools/tap-phantom $(builddir)/test-server $(top_srcdir)/
+HTML_LOG_COMPILER = $(top_srcdir)/tools/tap-phantom --strip=$(top_srcdir)/ -- $(HTML_TEST_SERVER)
 else
 HTML_LOG_DRIVER_FLAGS = --missing=phantomjs
 endif
@@ -118,11 +124,11 @@ valgrind-suppressions: $(VALGRIND_SUPPRESSIONS)
 
 check-memory: valgrind-suppressions
 	$(MAKE) LOG_FLAGS="-- valgrind $(VALGRIND_ARGS)" \
-		HTML_LOG_DRIVER_FLAGS="--missing=no-phantom-valgrind" \
+	        HTML_LOG_FLAGS="valgrind $(VALGRIND_ARGS) cockpit-bridge" \
 		$(AM_MAKEFLAGS) check
 recheck-memory: valgrind-suppressions
 	$(MAKE) LOG_FLAGS="-- valgrind $(VALGRIND_ARGS)" \
-		HTML_LOG_DRIVER_FLAGS="--missing=no-phantom-valgrind" \
+	        HTML_LOG_FLAGS="valgrind $(VALGRIND_ARGS) cockpit-bridge" \
 		$(AM_MAKEFLAGS) recheck
 
 SED_SUBST = sed \
@@ -161,7 +167,6 @@ install-test-assets: $(testassets_programs) $(testassets_data) $(testassets_syst
 clean-local:
 	find $(builddir) -name '*.gc??' -delete
 	find $(srcdir) -name '*.pyc' -delete
-	find $(builddir) -name '*.gz' -delete
 	rm -rf mock-archives
 
 uninstall-local:: uninstall-doc-local
@@ -212,6 +217,7 @@ install-data-local:: install-doc-local
 	@true
 
 dist-hook: dist-doc-hook
+	echo $(VERSION) > $(distdir)/.tarball
 	ln -s systemd $(distdir)/pkg/system
 
 distcheck-hook: dist-doc-hook
@@ -232,19 +238,27 @@ include pkg/base1/Makefile.am
 include pkg/dashboard/Makefile.am
 include pkg/docker/Makefile.am
 include pkg/kubernetes/Makefile.am
+include pkg/networkmanager/Makefile.am
 include pkg/playground/Makefile.am
 include pkg/realmd/Makefile.am
 include pkg/shell/Makefile.am
 include pkg/subscriptions/Makefile.am
 include pkg/systemd/Makefile.am
+include pkg/storaged/Makefile.am
+include pkg/users/Makefile.am
 include src/bridge/Makefile.am
 include src/common/Makefile-common.am
 include src/legacy/Makefile.am
-include src/legacy/lvm/Makefile.am
 include src/websocket/Makefile-websocket.am
 include tools/Makefile-tools.am
 include src/ws/Makefile-ws.am
 include src/static/Makefile-static.am
 include src/remotectl/Makefile-remotectl.am
 include src/reauthorize/Makefile-reauthorize.am
+include src/retest/Makefile.am
 include src/selinux/Makefile-selinux.am
+include src/pam-ssh-add/Makefile.am
+include branding/default/Makefile.am
+include branding/fedora/Makefile.am
+include branding/centos/Makefile.am
+include branding/rhel/Makefile.am

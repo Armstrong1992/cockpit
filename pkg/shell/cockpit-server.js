@@ -24,8 +24,9 @@ define([
     "shell/controls",
     "shell/shell",
     "shell/cockpit-main",
-    "system/server"
-], function($, cockpit, domain, controls, shell, main, server) {
+    "system/server",
+    "system/service"
+], function($, cockpit, domain, controls, shell, main, server, service) {
 "use strict";
 
 var _ = cockpit.gettext;
@@ -187,9 +188,8 @@ PageServer.prototype = {
 
         self.plot_controls = shell.setup_plot_controls($('#server'), $('#server-graph-toolbar'));
 
-        var systemd_client = cockpit.dbus("org.freedesktop.systemd1", { superuser: true });
-        var systemd_manager = systemd_client.proxy("org.freedesktop.systemd1.Manager",
-                                                   "/org/freedesktop/systemd1");
+        var pmcd_service = service.proxy("pmcd");
+        var pmlogger_service = service.proxy("pmlogger");
 
         self.pmlogger_onoff = controls.OnOff(false,
                                              change_pmlogger_state,
@@ -198,54 +198,38 @@ PageServer.prototype = {
                                              null);
 
         function change_pmlogger_state(val) {
-            function fail(error) {
-                console.warn("Enabling/disabling pmlogger failed", error.toString());
-                refresh_pmlogger_state();
-            }
-
-            systemd_manager.wait(function () {
+            if (pmlogger_service.exists) {
                 if (val) {
-                    /* The "pmcd" needs to be enabled and started
-                     * explicitly as well since the "pmlogger" service
-                     * does not formally require it.
-                     */
-                    systemd_manager.EnableUnitFiles(["pmcd.service", "pmlogger.service"], false, false).
-                        done(function () {
-                            $.when(systemd_manager.StartUnit("pmcd.service", "fail"),
-                                   systemd_manager.StartUnit("pmlogger.service", "fail")).
-                                fail(fail);
-                        }).
-                        fail(fail);
+                    $.when(pmcd_service.enable(),
+                           pmcd_service.start(),
+                           pmlogger_service.enable(),
+                           pmlogger_service.start()).
+                        fail(function (error) {
+                            console.warn("Enabling pmlogger failed", error);
+                        });
                 } else {
-                    systemd_manager.StopUnit("pmlogger.service", "fail").
-                        done(function () {
-                            systemd_manager.DisableUnitFiles(["pmlogger.service"], false).
-                                fail(fail);
-                        }).
-                        fail(fail);
+                    $.when(pmlogger_service.disable(),
+                           pmlogger_service.stop()).
+                        fail(function (error) {
+                            console.warn("Disabling pmlogger failed", error);
+                        });
                 }
-            });
+            }
         }
 
         function refresh_pmlogger_state() {
-            systemd_manager.wait(function () {
-                systemd_manager.GetUnitFileState("pmlogger.service").
-                    done(function (state) {
-                        self.pmlogger_onoff.set(state.indexOf("enabled") === 0);
-                        $('#server-pmlogger-onoff-row').show();
-                    }).
-                    fail(function (error) {
-                        console.log(error);
-                        console.warn(error.toString());
-                        $('#server-pmlogger-onoff-row').hide();
-                    });
-            });
+            if (!pmlogger_service.exists)
+                $('#server-pmlogger-onoff-row').hide();
+            else {
+                self.pmlogger_onoff.set(pmlogger_service.enabled);
+                $('#server-pmlogger-onoff-row').show();
+            }
         }
 
-        $(systemd_manager).on("UnitFilesChanged", refresh_pmlogger_state);
-        refresh_pmlogger_state();
-
         $('#server-pmlogger-onoff').empty().append(self.pmlogger_onoff);
+
+        $(pmlogger_service).on('changed', refresh_pmlogger_state);
+        refresh_pmlogger_state();
     },
 
     enter: function() {
@@ -260,8 +244,10 @@ PageServer.prototype = {
         // from hostname1 here. Once we require system > 211
         // we should change this.
         function parse_pretty_name(data, tag, ex) {
-            if (ex)
+            if (ex) {
                 console.warn("couldn't load os data: " + ex);
+                data = "";
+            }
 
             var lines = data.split("\n");
             for (var i = 0; i < lines.length; i++) {
@@ -423,7 +409,7 @@ PageServer.prototype = {
             });
 
         cockpit.spawn(["grep", "\\w", "product_serial", "chassis_serial"],
-                      { directory: "/sys/devices/virtual/dmi/id", superuser: true, err: "ignore" })
+                      { directory: "/sys/devices/virtual/dmi/id", superuser: "try", err: "ignore" })
             .done(function(output) {
                 var fields = parse_lines(output);
                 $("#system_information_asset_tag_text").text(fields.product_serial ||
@@ -434,6 +420,9 @@ PageServer.prototype = {
             });
 
         function hostname_text() {
+            if (!self.hostname_proxy)
+                return;
+
             var pretty_hostname = self.hostname_proxy.PrettyHostname;
             var static_hostname = self.hostname_proxy.StaticHostname;
 
@@ -657,20 +646,31 @@ shell.dialogs.push(new PageSystemInformationChangeHostname());
 PageSystemInformationChangeSystime.prototype = {
     _init: function() {
         this.id = "system_information_change_systime";
+        this.date = "";
     },
 
     setup: function() {
+        function enable_apply_button() {
+            $('#systime-apply-button').prop('disabled', false);
+        }
+
         $("#systime-apply-button").on("click", $.proxy(this._on_apply_button, this));
         $('#change_systime').on('change', $.proxy(this, "update"));
         $('#systime-time-minutes').on('focusout', $.proxy(this, "update_minutes"));
-        $('#systime-time-minutes').on('change', $.proxy(this, "check_input"));
-        $('#systime-time-hours').on('change', $.proxy(this, "check_input"));
-        $('#systime-date-input').on('change', $.proxy(this, "check_input"));
         $('#systime-date-input').datepicker({
             autoclose: true,
             todayHighlight: true,
             format: 'yyyy-mm-dd'
         });
+        $('#systime-timezones').css('max-height', '10em');
+        $('#systime-timezones').combobox();
+
+        $('#systime-time-minutes').on('input', enable_apply_button);
+        $('#systime-time-hours').on('input', enable_apply_button);
+        $('#systime-date-input').on('input', enable_apply_button);
+        $('#systime-timezones').on('change', enable_apply_button);
+        $('#systime-date-input').on('focusin', $.proxy(this, "store_date"));
+        $('#systime-date-input').on('focusout', $.proxy(this, "restore_date"));
     },
 
     enter: function() {
@@ -681,11 +681,40 @@ PageSystemInformationChangeSystime.prototype = {
         $('#systime-time-hours').val(server_time.now.getUTCHours());
         $('#change_systime').val(server_time.timedate.NTP ? 'ntp_time' : 'manual_time');
         $('#change_systime').selectpicker('refresh');
-        $('#systime-parse-error').css('visibility', 'hidden');
+        $('#systime-parse-error').parents('tr').hide();
+        $('#systime-timezone-error').parents('tr').hide();
         $('#systime-apply-button').prop('disabled', false);
+        $('#systime-timezones').prop('disabled', 'disabled');
 
         this.update();
         this.update_minutes();
+        this.get_timezones();
+    },
+
+    get_timezones: function() {
+        var self = this;
+
+        function parse_timezones(content) {
+            var timezones = [];
+            var lines = content.split('\n');
+            var curr_timezone = PageSystemInformationChangeSystime.server_time.timedate.Timezone;
+
+            $('#systime-timezones').empty();
+
+            for (var i = 0; i < lines.length; i++) {
+                $('#systime-timezones').append($('<option>', {
+                    value: lines[i],
+                    text: lines[i].replace(/_/g, " "),
+                    selected: lines[i] == curr_timezone
+                }));
+            }
+
+            $('#systime-timezones').prop('disabled', false);
+            $('#systime-timezones').combobox('refresh');
+        }
+
+        cockpit.spawn(["/usr/bin/timedatectl", "list-timezones"])
+           .done(parse_timezones);
     },
 
     show: function() {
@@ -697,9 +726,10 @@ PageSystemInformationChangeSystime.prototype = {
     _on_apply_button: function(event) {
         var server_time = PageSystemInformationChangeSystime.server_time;
 
-        var manual_time = $('#change_systime').val() == 'manual_time';
-        if (manual_time && !this.check_input())
+        if (! this.check_input())
             return;
+
+        var manual_time = $('#change_systime').val() == 'manual_time';
 
         server_time.timedate.SetNTP($('#change_systime').val() == 'ntp_time', true)
             .fail(function(err) {
@@ -707,6 +737,13 @@ PageSystemInformationChangeSystime.prototype = {
                 $("#system_information_change_systime").modal('hide');
             })
             .done(function() {
+                if (! $('#systime-timezones').prop('disabled')) {
+                    server_time.timedate.SetTimezone($('#systime-timezones').val(), true)
+                        .fail(function(err) {
+                            shell.show_unexpected_error(err);
+                        });
+                }
+
                 if (!manual_time) {
                     $("#system_information_change_systime").modal('hide');
                     return;
@@ -727,6 +764,7 @@ PageSystemInformationChangeSystime.prototype = {
     check_input: function() {
         var time_error = false;
         var date_error = false;
+        var timezone_error = false;
         var new_date;
 
         var hours = parseInt($('#systime-time-hours').val(), 10);
@@ -748,15 +786,26 @@ PageSystemInformationChangeSystime.prototype = {
            $('#systime-parse-error').text(_("Invalid time format"));
         else if (date_error)
            $('#systime-parse-error').text(_("Invalid date format"));
-        else
-           $('#systime-parse-error').css('visibility', 'hidden');
 
-        if (time_error || date_error) {
-            $('#systime-parse-error').css('visibility', 'visible');
+        if ($('#systime-timezones').val() === "") {
+           timezone_error = true;
+           $('#systime-timezone-error').css('visibility', 'visible');
+        } else {
+           $('#systime-timezone-error').css('visibility', 'hidden');
+        }
+
+        $('#systime-timezones').toggleClass("has-error", ! timezone_error);
+        $('#systime-time-hours').toggleClass("has-error", ! time_error);
+        $('#systime-time-minutes').toggleClass("has-error", ! time_error);
+        $('#systime-date-input').toggleClass("has-error", ! date_error);
+
+        $('#systime-parse-error').parents('tr').toggle(time_error || date_error);
+        $('#systime-timezone-error').parents('tr').toggle(timezone_error);
+
+        if (time_error || date_error || timezone_error) {
             $('#systime-apply-button').prop('disabled', true);
             return false;
         } else {
-            $('#systime-parse-error').css('visibility', 'hidden');
             $('#systime-apply-button').prop('disabled', false);
             return true;
         }
@@ -773,6 +822,15 @@ PageSystemInformationChangeSystime.prototype = {
         var val = parseInt($('#systime-time-minutes').val(), 10);
         if (val < 10)
             $('#systime-time-minutes').val("0" + val);
+    },
+
+    store_date: function() {
+        this.date = $("#systime-date-input").val();
+    },
+
+    restore_date: function() {
+        if ($("#systime-date-input").val().length === 0)
+            $("#systime-date-input").val(this.date);
     }
 };
 
@@ -858,12 +916,14 @@ PageShutdownDialog.prototype = {
             when = "+" + delay;
 
         var arg = (op == "shutdown") ? "--poweroff" : "--reboot";
-        cockpit.spawn(["shutdown", arg, when, message], { superuser: true })
+        cockpit.spawn(["shutdown", arg, when, message], { superuser: "try" })
             .fail(function(ex) {
                 $('#shutdown-dialog').modal('hide');
                 shell.show_unexpected_error(ex);
             })
             .done(function(ex) {
+                if (op == "restart")
+                    cockpit.hint("restart");
                 $('#shutdown-dialog').modal('hide');
             });
     },

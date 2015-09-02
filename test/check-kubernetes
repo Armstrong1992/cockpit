@@ -22,13 +22,48 @@ from testlib import *
 import json
 import os
 import sys
+import unittest
 
-class TestKubernetes(MachineCase):
+@unittest.skipIf("rhel-7" == os.environ.get("TEST_OS", ""), "Skipping check-kubernetes on rhel-7.")
+class KubernetesCase(MachineCase):
+
+    # HACK: https://github.com/GoogleCloudPlatform/kubernetes/issues/8311
+    # Work around for the fact that kube-apiserver doesn't notify about startup
+    # We wait until available or timeout.
+    def wait_api_server(self, port=8080, timeout=60, scheme='http'):
+        waiter = """
+        port=%d
+        timeout=%d
+        scheme=%s
+        for a in $(seq 0 $timeout); do
+            if curl -o /dev/null -k -s $scheme://localhost:$port; then
+                break
+            fi
+            sleep 0.5
+        done
+        """ % (port, timeout * 2, scheme)
+        self.machine.execute(script=waiter)
+
+    # HACK - https://bugzilla.redhat.com/show_bug.cgi?id=1243827
+    #
+    # HACK - https://github.com/GoogleCloudPlatform/kubernetes/issues/11222
+    # The default install of kubernetes does not let you start pods due to
+    # ServiceAccount admission control. So remove that.
+    def fix_apiserver_config(self):
+        self.machine.execute("sed -i /etc/kubernetes/apiserver -e 's/4001/2379/' -e 's/,ServiceAccount//'")
+
+
+@unittest.skipIf("rhel-7" == os.environ.get("TEST_OS", ""), "Skipping check-kubernetes on rhel-7.")
+class TestKubernetes(KubernetesCase):
     def setUp(self):
         MachineCase.setUp(self)
         m = self.machine
-        m.execute("systemctl start etcd kube-apiserver kube-controller-manager docker kube-proxy kubelet")
+
+        self.fix_apiserver_config()
+        m.execute("systemctl start etcd kube-apiserver kube-controller-manager kube-scheduler docker kube-proxy kubelet")
+
         m.upload(["mock-k8s-tiny-app.json"], "/tmp")
+        self.wait_api_server()
 
     def testDashboard(self):
         b = self.browser
@@ -45,6 +80,7 @@ class TestKubernetes(MachineCase):
         b.wait_popup("deploy-app-dialog")
         b.upload_file("#deploy-app-manifest-file", "mock-k8s-tiny-app.json")
         b.set_val("#deploy-app-namespace", "mynamespace")
+        self.assertEqual(b.text("#deploy-app-namespace-group ul"), "default")
         b.dialog_complete("#deploy-app-dialog")
         b.wait_in_text("#service-list", "mynamespace")
 
@@ -55,5 +91,109 @@ class TestKubernetes(MachineCase):
         b.set_val("#deploy-app-namespace", "!!!!")
         b.dialog_complete("#deploy-app-dialog", result="fail")
         b.dialog_cancel("#deploy-app-dialog")
+
+        # Successfully add node via dialog
+        b.click("#add-node")
+        b.wait_popup("node-dialog")
+        b.set_val("#node-name", "mynode")
+        b.set_val("#node-address", "myaddress")
+        b.dialog_complete("#node-dialog")
+        b.wait_in_text("#node-list", "mynode")
+        b.wait_in_text("#node-list", "myaddress")
+
+        # Fail add node via dialog
+        b.click("#add-node")
+        b.wait_popup("node-dialog")
+        b.set_val("#node-name", "!!!!")
+        b.set_val("#node-address", "!!!!")
+        b.dialog_complete("#node-dialog", result="fail")
+        b.dialog_cancel("#node-dialog")
+
+        # Make sure pod has started
+        with b.wait_timeout(120):
+            b.wait_text("#service-list tr[data-name='mock']:first-of-type td.containers", "1")
+        b.click("#service-list tr[data-name='mock']:first-of-type")
+
+        # Check that clicking on service goes to containers
+        b.wait_present("#content .kube-details .kube-container")
+        self.assertEqual(b.text("#content .kube-details .kube-container h3.panel-title"), " mock-container")
+
+        # Check that service shows up on listing view
+        b.click("a[href='#/list']")
+        b.wait_present("#content .kube-listing")
+        self.assertEqual(b.text(".kube-listing div[data-kind=Service] tbody:last-child .kube-col-name"), "mock")
+        self.assertEqual(b.text(".kube-listing div[data-kind=ReplicationController] tbody:last-child td.kube-col-name"), "mock")
+        self.assertEqual(b.text(".kube-listing div[data-kind=Pod] tbody:last-child tr.kube-row-container td.kube-col-name"), "mock-container")
+
+    def testTopology(self):
+        m = self.machine
+        b = self.browser
+
+        m.execute("kubectl create -f /tmp/mock-k8s-tiny-app.json")
+
+        # The service has loaded and containers instantiated
+        self.login_and_go("/kubernetes/cluster", host=None)
+        b.wait_present("#service-list tr[data-name='mock'] td.containers")
+        with b.wait_timeout(120):
+            b.wait_text("#service-list tr[data-name='mock'] td.containers", "1")
+
+        # Switch to topology view
+        b.click("a[href='#/topology']")
+
+        # Assert that at least one link between Service and Pod has loaded
+        b.wait_present("svg line.ServicePod")
+
+
+@unittest.skipIf("rhel-7" == os.environ.get("TEST_OS", ""), "Skipping check-kubernetes on rhel-7.")
+class TestSsl(KubernetesCase):
+    def testConnect(self):
+        m = self.machine
+        b = self.browser
+
+        # Start a kube-apiserver with a 'wrong' http port, forcing use of https
+        m.execute("echo 'KUBE_API_PORT=\"--port=1111\"' >> /etc/kubernetes/apiserver")
+        m.execute("sed -i s/8080/1111/g /etc/kubernetes/*")
+        self.fix_apiserver_config()
+        m.execute("systemctl start etcd kube-apiserver kube-controller-manager docker kube-proxy kubelet")
+        self.wait_api_server(port=6443, scheme='https')
+
+        self.login_and_go("/kubernetes/cluster", host=None)
+        b.wait_in_text("#node-list", "127.0.0.1")
+
+        # Check that this failed as a double check
+        output = m.execute("curl -sS http://localhost:8080/api 2>&1 || true")
+        self.assertIn("Connection refused", output)
+
+        self.allow_journal_messages(".*: couldn't connect: Connection refused")
+
+@unittest.skipIf("rhel-7" == os.environ.get("TEST_OS", ""), "Skipping check-kubernetes on rhel-7.")
+class TestAuth(KubernetesCase):
+    def testConfig(self):
+        m = self.machine
+        b = self.browser
+
+        # Start a kube-apiserver with a 'wrong' http port, forcing use of https
+        m.execute("echo 'KUBE_API_PORT=\"--port=1111\"' >> /etc/kubernetes/apiserver")
+        m.execute("sed -i s/8080/1111/g /etc/kubernetes/*")
+
+        # Require authentication from kube
+        m.execute("echo 'KUBE_API_ARGS=\"--basic_auth_file=/etc/kubernetes/passwd --authorization_mode=ABAC --authorization_policy_file=/etc/kubernetes/authorization\"' >> /etc/kubernetes/apiserver")
+        m.execute("echo '{\"user\":\"admin\"}' > /etc/kubernetes/authorization")
+        m.execute("echo 'fubar,admin,10101' > /etc/kubernetes/passwd")
+
+        # Setup the kube stuff in the right place
+        m.upload(["mock-kube-config-basic.json"], "/tmp")
+        m.execute("mkdir -p /home/admin/.kube/ && mv /tmp/mock-kube-config-basic.json /home/admin/.kube/config")
+
+        self.fix_apiserver_config()
+        m.execute("systemctl start etcd kube-apiserver")
+        self.wait_api_server(port=6443, scheme='https')
+
+        self.login_and_go("/kubernetes/cluster", host=None)
+        b.wait_in_text("#service-list", "You can deploy an application to your cluster.")
+
+        # Check that this failed as a double check
+        output = m.execute("curl -k -sS https://localhost:6443/api 2>&1 || true")
+        self.assertIn("Unauthorized", output)
 
 test_main()

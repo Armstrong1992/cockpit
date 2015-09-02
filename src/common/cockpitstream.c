@@ -54,6 +54,7 @@ struct _CockpitStreamPrivate {
 
   GSource *in_source;
   GByteArray *in_buffer;
+  gboolean received;
 };
 
 static guint cockpit_stream_sig_read;
@@ -95,6 +96,9 @@ static void
 close_immediately (CockpitStream *self,
                    const gchar *problem)
 {
+  GError *error = NULL;
+  GIOStream *io;
+
   if (self->priv->closed)
     return;
 
@@ -124,9 +128,16 @@ close_immediately (CockpitStream *self,
 
   if (self->priv->io)
     {
-      g_io_stream_close_async (self->priv->io, G_PRIORITY_DEFAULT, NULL, NULL, NULL);
-      g_object_unref (self->priv->io);
+      io = self->priv->io;
       self->priv->io = NULL;
+
+      g_io_stream_close (io, NULL, &error);
+      if (error)
+        {
+          g_message ("%s: close failed: %s", self->priv->name, error->message);
+          g_clear_error (&error);
+        }
+      g_object_unref (io);
     }
 
   g_debug ("%s: closed", self->priv->name);
@@ -188,12 +199,72 @@ close_output (CockpitStream *self)
 #define G_IO_ERROR_CONNECTION_CLOSED G_IO_ERROR_BROKEN_PIPE
 #endif
 
+static gchar *
+describe_certificate_errors (CockpitStream *self)
+{
+  GTlsCertificateFlags flags;
+  GString *str;
+
+  if (!G_IS_TLS_CONNECTION (self->priv->io))
+    return NULL;
+
+  flags = g_tls_connection_get_peer_certificate_errors (G_TLS_CONNECTION (self->priv->io));
+  if (flags == 0)
+    return NULL;
+
+  str = g_string_new ("");
+
+  if (flags & G_TLS_CERTIFICATE_UNKNOWN_CA)
+    {
+      g_string_append (str, "untrusted-issuer ");
+      flags &= ~G_TLS_CERTIFICATE_UNKNOWN_CA;
+    }
+  if (flags & G_TLS_CERTIFICATE_BAD_IDENTITY)
+    {
+      g_string_append (str, "bad-server-identity ");
+      flags &= ~G_TLS_CERTIFICATE_BAD_IDENTITY;
+    }
+  if (flags & G_TLS_CERTIFICATE_NOT_ACTIVATED)
+    {
+      g_string_append (str, "not-yet-valid ");
+      flags &= ~G_TLS_CERTIFICATE_NOT_ACTIVATED;
+    }
+  if (flags & G_TLS_CERTIFICATE_EXPIRED)
+    {
+      g_string_append (str, "expired ");
+      flags &= ~G_TLS_CERTIFICATE_EXPIRED;
+    }
+  if (flags & G_TLS_CERTIFICATE_REVOKED)
+    {
+      g_string_append (str, "revoked ");
+      flags &= ~G_TLS_CERTIFICATE_REVOKED;
+    }
+  if (flags & G_TLS_CERTIFICATE_INSECURE)
+    {
+      g_string_append (str, "insecure ");
+      flags &= ~G_TLS_CERTIFICATE_INSECURE;
+    }
+  if (flags & G_TLS_CERTIFICATE_GENERIC_ERROR)
+    {
+      g_string_append (str, "generic-error ");
+      flags &= ~G_TLS_CERTIFICATE_GENERIC_ERROR;
+    }
+
+  if (flags != 0)
+    {
+      g_string_append (str, "...");
+    }
+
+  return g_string_free (str, FALSE);
+}
+
 static void
 set_problem_from_error (CockpitStream *self,
                         const gchar *summary,
                         GError *error)
 {
   const gchar *problem = NULL;
+  gchar *details = NULL;
 
   if (g_error_matches (error, G_IO_ERROR, G_IO_ERROR_PERMISSION_DENIED))
     problem = "access-denied";
@@ -201,19 +272,31 @@ set_problem_from_error (CockpitStream *self,
            g_error_matches (error, G_IO_ERROR, G_IO_ERROR_CONNECTION_REFUSED) ||
            g_error_matches (error, G_IO_ERROR, G_IO_ERROR_HOST_UNREACHABLE) ||
            g_error_matches (error, G_IO_ERROR, G_IO_ERROR_NETWORK_UNREACHABLE) ||
-           g_error_matches (error, G_IO_ERROR, G_IO_ERROR_HOST_NOT_FOUND))
+           g_error_matches (error, G_IO_ERROR, G_IO_ERROR_HOST_NOT_FOUND) ||
+           g_error_matches (error, G_RESOLVER_ERROR, G_RESOLVER_ERROR_NOT_FOUND))
     problem = "not-found";
   else if (g_error_matches (error, G_IO_ERROR, G_IO_ERROR_BROKEN_PIPE) ||
-           g_error_matches (error, G_IO_ERROR, G_IO_ERROR_CONNECTION_CLOSED))
+           g_error_matches (error, G_IO_ERROR, G_IO_ERROR_CONNECTION_CLOSED) ||
+           g_error_matches (error, G_TLS_ERROR, G_TLS_ERROR_EOF) ||
+           (self->priv->received && g_error_matches (error, G_TLS_ERROR, G_TLS_ERROR_MISC)))
     problem = "disconnected";
   else if (g_error_matches (error, G_IO_ERROR, G_IO_ERROR_TIMED_OUT))
     problem = "timeout";
+  else if (g_error_matches (error, G_TLS_ERROR, G_TLS_ERROR_NOT_TLS) ||
+           (!self->priv->received && g_error_matches (error, G_TLS_ERROR, G_TLS_ERROR_MISC)))
+    problem = "protocol-error";
+  else if (g_error_matches (error, G_TLS_ERROR, G_TLS_ERROR_BAD_CERTIFICATE))
+    {
+      problem = "unknown-hostkey";
+      details = describe_certificate_errors (self);
+    }
 
   g_free (self->priv->problem);
 
   if (problem)
     {
-      g_message ("%s: %s: %s", self->priv->name, summary, error->message);
+      g_message ("%s: %s: %s%s%s", self->priv->name, summary, error->message,
+                 details ? ": " : "", details ? details : "");
       self->priv->problem = g_strdup (problem);
     }
   else
@@ -221,6 +304,8 @@ set_problem_from_error (CockpitStream *self,
       g_warning ("%s: %s: %s", self->priv->name, summary, error->message);
       self->priv->problem = g_strdup ("internal-error");
     }
+
+  g_free (details);
 }
 
 static gboolean
@@ -229,50 +314,58 @@ dispatch_input (GPollableInputStream *is,
 {
   CockpitStream *self = (CockpitStream *)user_data;
   GError *error = NULL;
+  gboolean read = FALSE;
   gssize ret = 0;
   gsize len;
   gboolean eof;
 
-  g_return_val_if_fail (self->priv->in_source, FALSE);
-  len = self->priv->in_buffer->len;
-
-  g_byte_array_set_size (self->priv->in_buffer, len + 1024);
-  ret = g_pollable_input_stream_read_nonblocking (is, self->priv->in_buffer->data + len,
-                                                  1024, NULL, &error);
-
-  if (ret < 0)
+  for (;;)
     {
-      g_byte_array_set_size (self->priv->in_buffer, len);
-      if (g_error_matches (error, G_IO_ERROR, G_IO_ERROR_WOULD_BLOCK))
+      g_return_val_if_fail (self->priv->in_source, FALSE);
+      len = self->priv->in_buffer->len;
+
+      g_byte_array_set_size (self->priv->in_buffer, len + 1024);
+      ret = g_pollable_input_stream_read_nonblocking (is, self->priv->in_buffer->data + len,
+                                                      1024, NULL, &error);
+
+      if (ret < 0)
         {
-          g_error_free (error);
-          return TRUE;
+          g_byte_array_set_size (self->priv->in_buffer, len);
+          if (g_error_matches (error, G_IO_ERROR, G_IO_ERROR_WOULD_BLOCK))
+            {
+              g_error_free (error);
+              break;
+            }
+          else
+            {
+              set_problem_from_error (self, "couldn't read", error);
+              g_error_free (error);
+              close_immediately (self, NULL);
+              return FALSE;
+            }
         }
-      else
+
+      g_byte_array_set_size (self->priv->in_buffer, len + ret);
+
+      if (ret == 0)
         {
-          set_problem_from_error (self, "couldn't read", error);
-          g_error_free (error);
-          close_immediately (self, NULL);
-          return FALSE;
+          g_debug ("%s: end of input", self->priv->name);
+          stop_input (self);
+          break;
         }
-    }
-
-  g_byte_array_set_size (self->priv->in_buffer, len + ret);
-
-  if (ret == 0)
-    {
-      g_debug ("%s: end of input", self->priv->name);
-      stop_input (self);
-    }
-  else if (ret > 0)
-    {
-      g_debug ("%s: read %d bytes", self->priv->name, (int)ret);
+      else if (ret > 0)
+        {
+          g_debug ("%s: read %d bytes", self->priv->name, (int)ret);
+          self->priv->received = TRUE;
+          read = TRUE;
+        }
     }
 
   g_object_ref (self);
 
   eof = (self->priv->in_source == NULL);
-  g_signal_emit (self, cockpit_stream_sig_read, 0, self->priv->in_buffer, eof);
+  if (eof || read)
+    g_signal_emit (self, cockpit_stream_sig_read, 0, self->priv->in_buffer, eof);
 
   if (eof)
     close_maybe (self);
@@ -696,6 +789,20 @@ on_socket_connect (GObject *object,
 
               g_tls_client_connection_set_validation_flags (G_TLS_CLIENT_CONNECTION (self->priv->io),
                                                             self->priv->options->tls_client_flags);
+
+              if (self->priv->options->tls_cert)
+                {
+                  g_tls_connection_set_certificate (G_TLS_CONNECTION (self->priv->io),
+                                                    self->priv->options->tls_cert);
+                }
+              if (self->priv->options->tls_database)
+                {
+                  g_tls_connection_set_database (G_TLS_CONNECTION (self->priv->io),
+                                                 self->priv->options->tls_database);
+                }
+
+              /* We track data end the same way we do for HTTP */
+              g_tls_connection_set_require_close_notify (G_TLS_CONNECTION (self->priv->io), FALSE);
             }
         }
       else
@@ -890,6 +997,10 @@ cockpit_stream_options_unref (gpointer data)
 
   if (--(options->refs) <= 0)
     {
+      if (options->tls_cert)
+        g_object_unref (options->tls_cert);
+      if (options->tls_database)
+        g_object_unref (options->tls_database);
       g_free (options);
     }
 }

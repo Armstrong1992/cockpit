@@ -25,16 +25,19 @@ base=$(cd $(dirname $0)/../; pwd -P)
 
 usage()
 {
-	echo "usage: make-rpms [--clean] [--verbose]"
+	echo "usage: make-rpms [--clean] [--quick] [--verbose]"
 }
 
 mock_opts=""
 mock_clean_opts="--no-clean --no-cleanup-after"
-args=$(getopt -o "h,v,c" -l "help,verbose,clean" -- "$@")
+mock_define="unused"
+mock_value="0"
+
+args=$(getopt -o "h,v,c,q" -l "help,verbose,clean,quick" -- "$@")
 eval set -- "$args"
 while [ $# -gt 0 ]; do
 	case $1 in
-	--clean)
+	-c|--clean)
         # We always use --no-cleanup-after because a
         # --no-clean build can not start with a chroot that
         # has been cleaned previously.
@@ -42,6 +45,10 @@ while [ $# -gt 0 ]; do
 		;;
 	-v|--verbose)
 		mock_opts="$mock_opts --verbose"
+		;;
+	-q|--quick)
+		mock_define="selinux" mock_value="0"
+		mock_opts="$mock_opts --offline --nocheck"
 		;;
 	-h|--help)
 		usage
@@ -67,7 +74,19 @@ fi
 
 make_srpm=$base/tools/make-srpm
 
+# $os is the TEST_OS value that we are building for, without changes.
+# $mockos the mock configuration we are using as the basis for it.
+
 os=${TEST_OS:-}
+
+mockos=$os
+# if we're building for atomic, generate regular fedora packages
+if [[ "$os" =~ "fedora-atomic" ]]; then
+    mockos=${os/-atomic/}
+fi
+# drop a "-testing" suffix
+mockos=${mockos/%-testing/}
+
 arch=${TEST_ARCH:-}
 
 srpm=$("$make_srpm" "$@")
@@ -79,11 +98,11 @@ cp --preserve=timestamps /etc/mock/site-defaults.cfg $base/mock/
 cp --preserve=timestamps /etc/mock/logging.ini $base/mock/
 
 if [ "$os" == "rhel-7" ]; then
-    os="epel-7"
+    mockos="epel-7"
     # get epel packages instead, they don't require a subscription
-    cp --preserve=timestamps /etc/mock/$os-$arch.cfg $base/mock/$os-$arch-cockpit.cfg
+    cp --preserve=timestamps /etc/mock/$mockos-$arch.cfg $base/mock/$os-$arch-cockpit.cfg
     cat >>$base/mock/$os-$arch-cockpit.cfg <<EOF
-config_opts['root'] = "epel-7-$arch-cockpit"
+config_opts['root'] = "$os-$arch-cockpit"
 config_opts['yum.conf'] += """
 [sgallagh-cockpit-preview]
 name=Copr repo for cockpit-preview owned by sgallagh
@@ -95,25 +114,24 @@ enabled=1
 """
 EOF
 else
-    cp --preserve=timestamps /etc/mock/$os-$arch.cfg $base/mock/$os-$arch-cockpit.cfg
+    cp --preserve=timestamps /etc/mock/$mockos-$arch.cfg $base/mock/$os-$arch-cockpit.cfg
     cat >>$base/mock/$os-$arch-cockpit.cfg <<EOF
 config_opts['root'] = "$os-$arch-cockpit"
+EOF
+    if [[ "$os" =~ "-testing" ]]; then
+        cat >>$base/mock/$os-$arch-cockpit.cfg <<EOF
 config_opts['yum.conf'] += """
 [updates-testing]
 enabled=1
 """
 EOF
+    fi
 fi
 
-# HACK: Signatures can be unreliable in Fedora
-if [ "$os" == fedora-* ]; then
-    sed -i -e 's/gpgcheck=1/gpgcheck=0/' $base/mock/$os-$arch-cockpit.cfg
-fi
-
-touch -r /etc/mock/$os-$arch.cfg $base/mock/$os-$arch-cockpit.cfg
+touch -r /etc/mock/$mockos-$arch.cfg $base/mock/$os-$arch-cockpit.cfg
 
 if LANG=C /usr/bin/mock --quiet $mock_opts $mock_clean_opts --configdir=$base/mock/ \
-	--resultdir $base/mock -r $os-$arch-cockpit $srpm; then
+	--resultdir $base/mock -r $os-$arch-cockpit --define="$mock_define $mock_value" $srpm; then
     grep "^Wrote: .*\.\($arch\|noarch\)\.rpm$" $base/mock/build.log | while read l; do
         p=$(basename "$l") # knocks off the "Wrote:" part as well...
         echo $p

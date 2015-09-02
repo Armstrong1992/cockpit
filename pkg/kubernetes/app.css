@@ -1,5 +1,56 @@
+@import url('details.css');
+@import url('topology-graph.css');
+@import url('topology.css');
+@import url('listing.css');
+@import url('revealable.css');
+
+#graphs {
+    display: block;
+}
+
+#graphs svg {
+    font-size: 10px;
+}
+
+#graphs ul {
+    padding-top: 15px;
+    margin-right: 10px;
+}
+
+.axis path, .axis line {
+    fill: none;
+    stroke: #000;
+    shape-rendering: crispEdges;
+}
+
+.axis .domain,
+.axis .tick line {
+    stroke: lightgrey;
+    opacity: 0.5;
+}
+
+.tick text {
+    fill: #545454;
+    font-size: 12px;
+}
+
+path.line {
+    stroke: steelblue;
+    fill: none;
+    stroke-width: 2;
+}
+
+path.line.highlight {
+    stroke-width: 4;
+}
 
 /* Page global stuff */
+
+.curtains {
+    height: 100%;
+    width: 100%;
+    position: fixed;
+}
 
 .container-fluid {
     margin-top: 0px;
@@ -7,7 +58,6 @@
 }
 
 .kube-sidebar {
-    float: left;
     width: 100px;
 }
 
@@ -15,26 +65,37 @@
     margin: 0;
     padding: 0;
     list-style: none;
-    width: 98px;
+    width: 90px;
     border-right: 1px solid #dadada;
     height: 100%;
+    position: fixed;
+    background-color: #fafafa;
+    top: 0px;
 }
 
 .kube-sidebar ul li {
     border-bottom: 1px solid #dadada;
     display: block;
-    font-size: 15px;
+    font-size: 13px;
 }
 
 .kube-sidebar ul li a {
     border-bottom: 0;
     background-color: #fff;
-    padding: 20px 15px;
+    padding: 15px 10px;
     text-align: center;
     display: block;
     color: inherit;
     text-decoration: none;
     position: relative;
+}
+
+.kube-sidebar ul li a:hover {
+    background-color: #f6f6f6;
+}
+
+.kube-sidebar ul li.active a:hover {
+    background-color: #fff;
 }
 
 .kube-sidebar ul li a .fa {
@@ -61,19 +122,13 @@
 /* Dashboard */
 
 #content {
-    margin-left: 120px;
+    margin-left: 110px;
     margin-right: 0px;
+    min-height: 100%;
 }
 
-#graphs {
-    margin: 15px 0;
-    height: 280px;
-    background-color: #e6e6e6;
-    font-size: 80px;
-    color: #c3c3c3;
-    font-family: Open Sans;
-    text-align: center;
-    padding: 60px;
+#content > .row {
+    margin-right: 0px;
 }
 
 /* When panel is editable, then buttons are visible */
@@ -134,6 +189,11 @@
     padding-right: 25px;
 }
 
+.deploy-app-type-text {
+    font-style: normal;
+    text-align: left;
+}
+
 .manifest_file {
     font-style: normal;
     text-align: left;
@@ -162,4 +222,29 @@ input.adjust-replica {
 
 #adjust-dialog .modal-dialog {
     width: 400px;
+}
+
+#deploy-app-type-field > .bootstrap-select {
+    margin-bottom: 3px;
+}
+
+.app-name {
+    color: #333333;
+    margin-top: 10px;
+    text-align: left;
+}
+
+/* HACK: https://github.com/patternfly/patternfly/issues/75 */
+.blank-slate-pf .fa {
+    color: #999999;
+}
+
+.blank-slate-pf .spinner-lg {
+    height: 58px;
+    width: 58px;
+}
+
+/* Used to hide angular elements until they are ready */
+[ng\:cloak], [ng-cloak], [data-ng-cloak], [x-ng-cloak], .ng-cloak, .x-ng-cloak {
+    display: none !important;
 }

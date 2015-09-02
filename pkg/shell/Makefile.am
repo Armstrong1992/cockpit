@@ -1,14 +1,22 @@
 shelldir = $(pkgdatadir)/shell
-shell_DATA = \
+shell_GZ = \
 	pkg/shell/shell.min.js.gz \
 	pkg/shell/bundle.min.js.gz \
-	pkg/shell/index.min.html \
 	pkg/shell/shell.min.css.gz \
 	pkg/shell/shell.min.html.gz \
+	$(NULL)
+shell_DATA = \
+	pkg/shell/index.min.html \
 	pkg/shell/manifest.json \
+	$(shell_GZ) \
 	$(NULL)
 
-shelldebugdir = $(DBGDIR)$(shelldir)
+shell_SCRIPTS = \
+	pkg/shell/ssh-add-public-key.sh \
+	pkg/shell/ssh-list-public-keys.sh \
+	$(NULL)
+
+shelldebugdir = $(debugdir)$(shelldir)
 shelldebug_DATA = \
 	pkg/shell/shell.js \
 	pkg/shell/bundle.js \
@@ -29,22 +37,25 @@ shelldebug_DATA = \
 	pkg/shell/cockpit-server.js \
 	pkg/shell/cockpit-cpu-status.js \
 	pkg/shell/cockpit-memory-status.js \
-	pkg/shell/cockpit-networking.js \
-	pkg/shell/cockpit-storage.js \
-	pkg/shell/cockpit-accounts.js \
-	pkg/shell/cockpit-docker.js \
+	pkg/shell/authorized-keys.js \
+	$(shell_SCRIPTS) \
+	$(NULL)
+
+# shell_BUNDLEFILES are included in files to be cleaned
+shell_BUNDLEFILES = \
+	pkg/shell/index.min.js \
+	pkg/shell/machines.min.js \
 	$(NULL)
 
 shell_BUNDLE = \
-	pkg/shell/index.min.js \
-	pkg/shell/machines.min.js \
+	$(shell_BUNDLEFILES) \
+	$(shell_SCRIPTS) \
 	$(NULL)
 
 pkg/shell/bundle.min.js: $(shell_BUNDLE)
 	$(AM_V_GEN) $(srcdir)/tools/missing $(srcdir)/tools/jsbundle $@ $^
 
-shell_SHELL = \
-	pkg/shell/shell.js \
+shell_MINFILES = \
 	pkg/shell/dbus.min.js \
 	pkg/shell/controls.min.js \
 	pkg/shell/plot.min.js \
@@ -57,10 +68,12 @@ shell_SHELL = \
 	pkg/shell/cockpit-server.min.js \
 	pkg/shell/cockpit-cpu-status.min.js \
 	pkg/shell/cockpit-memory-status.min.js \
-	pkg/shell/cockpit-networking.min.js \
-	pkg/shell/cockpit-storage.min.js \
-	pkg/shell/cockpit-accounts.min.js \
-	pkg/shell/cockpit-docker.min.js \
+	pkg/shell/authorized-keys.min.js \
+	$(NULL)
+
+shell_SHELL = \
+	pkg/shell/shell.js \
+	$(shell_MINFILES) \
 	$(NULL)
 
 pkg/shell/shell.min.js: $(shell_SHELL)
@@ -72,7 +85,6 @@ shellimages_DATA = \
 	pkg/shell/images/server-small.png \
 	pkg/shell/images/server-error.png \
 	pkg/shell/images/dialog-error.png \
-	pkg/shell/images/storage-disk.png \
 	$(NULL)
 
 pmlogconfdir = $(localstatedir)/lib/pcp/config/pmlogconf/tools
@@ -80,14 +92,15 @@ pmlogconf_DATA = pkg/shell/pmlogconf/cockpit
 
 # -----------------------------------------------------------------------------
 
-CHECK_HTML = \
+shell_TESTS = \
 	pkg/shell/test-dummy.html \
 	pkg/shell/test-util.html \
 	pkg/shell/test-dbusx.html \
 	pkg/shell/test-controls.html \
+	pkg/shell/test-list-public-keys.sh \
 	$(NULL)
 
-TESTS += $(CHECK_HTML)
+TESTS += $(shell_TESTS)
 
 # ----------------------------------------------------------------------------------------------------
 
@@ -96,10 +109,13 @@ CLEANFILES += \
 	pkg/shell/bundle.min.js \
 	pkg/shell/index.min.html \
 	pkg/shell/shell.min.html \
-	$(shell_BUNDLE) \
+	$(shell_BUNDLEFILES) \
+	$(shell_GZ) \
+	$(shell_MINFILES) \
 	$(NULL)
 
 EXTRA_DIST += \
+	pkg/shell/mock \
 	pkg/shell/shell.min.js \
 	pkg/shell/bundle.min.js \
 	pkg/shell/index.min.html \
@@ -109,6 +125,6 @@ EXTRA_DIST += \
 	$(shell_SHELL) \
 	$(shelldebug_DATA) \
 	$(shellimages_DATA) \
-	$(CHECK_HTML) \
+	$(shell_TESTS) \
 	pkg/shell/pmlogconf/cockpit \
 	$(NULL)

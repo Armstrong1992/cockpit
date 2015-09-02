@@ -101,7 +101,7 @@ The following fields are defined:
  * "payload": A payload type, see below
  * "host": The destination host for the channel, defaults to "localhost"
  * "user": Optional alternate user for authenticating with host
- * "superuser": When true, try to run this channel as root.
+ * "superuser": Optional. Use "require" to run as root, or "try" to attempt to run as root.
  * "group": A group that can later be used with the "kill" command.
  * "capabilities": Optional, array of capability strings required from the bridge
 
@@ -294,15 +294,10 @@ type:
    channel will communicate with the internal bridge DBus connection.
  * "name": A service name of the DBus service to communicate with. Set to
    null if "bus" is "internal".
- * "track": Only talk with the first name DBus owner of the service
-   name, and close the channel when it goes away.
 
 The DBus bus name is started on the bus if it is not already running. If it
 could not be started the channel is closed with a "not-found". If the DBus
 connection closes, the channel closes with "disconnected".
-
-If "track" is set to true, then the channel will also close without a
-problem, if the bus name goes away (ie: the service exits).
 
 DBus messages are encoded as JSON objects. If an unrecognized JSON object
 is received, then the channel is closed with a "protocol-error".
@@ -466,6 +461,14 @@ will be defined here, but this is it for now.
         }
     }
 
+When the owner of the DBus name changes an "owner" message is sent.
+The owner value will be the id of the owner or null if the name is unowned.
+
+    {
+        "owner": "1:"
+    }
+
+
 DBus types are encoded in various places in these messages, such as the
 arguments. These types are encoded as follows:
 
@@ -524,13 +527,30 @@ payload type:
 
  * "unix": Open a channel with the given unix socket.
  * "port": Open a channel with the given TCP port on localhost.
- * "tls": Set to a (currently empty) object to use an https connection.
+ * "address": Open a channel that communicates with the given
+   address instead of localhost. This can be an IP address or a valid
+   host name. To use this option you must also specify a port.
+   This option should be used to communicate with external
+   apis and not as a synonym for the host parameter.
 
 You may also specify these options:
 
- * "connection": A connection identifier. Subsequent channel requests
-   with the same identifier will try to use the same connection if it
-   is still open.
+ * "connection": A stable connection identifier.
+ * "tls": Set to a object to use an https connection.
+
+The TLS object can have the following options:
+
+ * "certificate": The client certificate to use, represented as an
+   object described below.
+ * "key": The client key to use, described below.
+ * "authority": Certificate authority(s) to expect as signers of peer.
+ * "validate": Validate the peer's certificate.
+
+The "certificate", "key" and "authority" are objects with either of
+the following fields:
+
+ * "file": String with a file name
+ * "data": String with PEM encoded data
 
 Any data to be sent should be sent via the channel, and then the channel
 should be closed without a problem.
@@ -556,6 +576,9 @@ this payload type:
  * "spawn": Spawn a process and connect standard input and standard output
    to the channel. Should be an array of strings which is the process
    file path and arguments.
+ * "internal": Open an internally defined stream.
+   * "packages": A http-stream for serving package resources to cockpit-ws
+   * "ssh-agent": A connection to the session user's ssh-agent, if one is available.
 
 You can't specify both "unix" and "spawn" together. When "spawn" is set the
 following options can be specified:

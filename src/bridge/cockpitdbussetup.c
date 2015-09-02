@@ -38,7 +38,7 @@ const gchar *cockpit_bridge_path_shadow = "/etc/shadow";
 
 const gchar *cockpit_bridge_path_newusers = "/usr/sbin/newusers";
 const gchar *cockpit_bridge_path_chpasswd = "/usr/sbin/chpasswd";
-const gchar *cockpit_bridge_path_usermod = "/usr/sbin/usermod";
+const gchar *cockpit_bridge_path_usermod = PATH_USERMOD;
 
 static GVariant *
 setup_get_property (GDBusConnection *connection,
@@ -485,11 +485,11 @@ perform_usermod (CommitAdmin1 *context)
 
       g_debug ("adding user '%s' to groups: %s", argv[1], argv[4]);
 
-      pipe = cockpit_pipe_spawn (argv, NULL, NULL, COCKPIT_PIPE_STDERR_TO_LOG);
+      pipe = cockpit_pipe_spawn (argv, NULL, NULL, COCKPIT_PIPE_FLAGS_NONE);
+      g_hash_table_iter_remove (&iter);
+
       g_signal_connect (pipe, "close", G_CALLBACK (on_usermod_close), context);
       cockpit_pipe_close (pipe, NULL);
-
-      g_hash_table_iter_remove (&iter);
     }
   else
     {
@@ -540,7 +540,7 @@ on_newusers_close (CockpitPipe *pipe,
     {
       g_debug ("batch changing user passwords");
 
-      next = cockpit_pipe_spawn (argv, NULL, NULL, COCKPIT_PIPE_STDERR_TO_LOG);
+      next = cockpit_pipe_spawn (argv, NULL, NULL, COCKPIT_PIPE_FLAGS_NONE);
       g_signal_connect (next, "close", G_CALLBACK (on_chpasswd_close), context);
       cockpit_pipe_write (next, context->chpasswd);
       cockpit_pipe_close (next, NULL);
@@ -680,7 +680,7 @@ setup_commit_passwd1 (GVariant *parameters,
   g_debug ("batch creating new users");
 
   bytes = g_string_free_to_bytes (newusers);
-  pipe = cockpit_pipe_spawn (argv, NULL, NULL, COCKPIT_PIPE_STDERR_TO_LOG);
+  pipe = cockpit_pipe_spawn (argv, NULL, NULL, COCKPIT_PIPE_FLAGS_NONE);
   g_signal_connect (pipe, "close", G_CALLBACK (on_newusers_close), context);
   cockpit_pipe_write (pipe, bytes);
   cockpit_pipe_close (pipe, NULL);

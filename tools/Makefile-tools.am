@@ -1,13 +1,12 @@
 EXTRA_DIST += \
-	tools/atomic-install \
-	tools/atomic-run \
-	tools/atomic-uninstall \
 	tools/bower \
 	tools/bower.json \
 	tools/html-minifier \
 	tools/htmlmin.conf \
 	tools/jsbundle \
+	tools/jsmodule \
 	tools/cssbundle \
+        tools/ngbundle \
 	tools/po2json \
 	tools/jshint \
 	tools/parsejson \
@@ -20,16 +19,23 @@ EXTRA_DIST += \
 	tools/qunit.js \
 	tools/qunit-config.js \
 	tools/gdbus-unbreak-codegen \
+	$(VALGRIND_SUPPRESSIONS)
+	$(NULL)
+
+DISTCLEANFILES += \
+	tools/node_modules \
+	tools/bower_components \
 	$(NULL)
 
 update-lib:: update-bower
-	$(srcdir)/tools/jsbundle $(srcdir)/tools/qunit.js \
+	$(srcdir)/tools/jsmodule -o $(srcdir)/tools/qunit.js \
 	    $(BOWER)/jquery/dist/jquery.js \
 	    $(BOWER)/qunit/qunit/qunit.js \
 	    $(BOWER)/qunit-tap/lib/qunit-tap.js \
 	    $(srcdir)/tools/qunit-config.js
 	cp $(BOWER)/qunit/qunit/qunit.css $(srcdir)/tools/qunit.css
-	cp $(BOWER)/sizzle/dist/sizzle.js $(srcdir)/test/sizzle.js
+	sed -e 's/define\.amd/define\.amd_disabled/' -e 's/module\.exports/module\.exports_disabled/' \
+		$(BOWER)/sizzle/dist/sizzle.js > $(srcdir)/test/sizzle.js
 
 if WITH_COVERAGE
 coverage:

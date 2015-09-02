@@ -30,6 +30,8 @@ define([
     cockpit.locale(po);
     var _ = cockpit.gettext;
 
+    var default_title = "Cockpit";
+
     /* The oops bar */
 
     var oops = null;
@@ -63,6 +65,28 @@ define([
         };
     }
 
+    /* Branding */
+
+    function brand(id) {
+        var os_release = JSON.parse(window.localStorage['os-release'] || "{}");
+
+        var elt = $(id)[0];
+        if (!elt)
+            return;
+
+        var len, content = window.getComputedStyle(elt).content;
+        if (content && content != "none") {
+            len = content.length;
+            if ((content[0] === '"' || content[0] === '\'') &&
+                len > 2 && content[len - 1] === content[0])
+                content = content.substr(1, len - 2);
+            elt.innerHTML = cockpit.format(content, os_release) || default_title;
+            default_title = $(elt).text();
+        }
+    }
+
+    brand('#index-brand');
+
     /* Basic menu items */
 
     $("#deauthorize-item").on("click", function(ev) {
@@ -78,7 +102,7 @@ define([
         cockpit.logout();
     });
     $("#go-account").on("click", function() {
-        cockpit.location.go([ "@localhost", "users", "local" ], { id: cockpit.user["user"] });
+        cockpit.location.go([ "@localhost", "users", "local", cockpit.user["user"] ]);
     });
 
     /* User name and menu */
@@ -176,10 +200,12 @@ define([
     var current_location;
     var current_address;
 
-    var machines = new machis.instance();
+    var machines = machis.instance();
     var frames = new Frames();
     var router = new Router();
     var packages = new Packages();
+
+    var checksums = {};
 
     function maybe_ready() {
         if (ready)
@@ -195,19 +221,25 @@ define([
     $(machines)
         .on("ready", function(ev) {
             machines.loaded = true;
-            $(cockpit).on("locationchanged", navigate);
+            $(cockpit).on("locationchanged", function () {
+                navigate(true);
+            });
             build_navbar();
-            navigate();
+            navigate(false);
             maybe_ready();
         })
         .on("added changed", function(ev, machine) {
-            if (machine.visible)
-                machine.connect();
-            else
+            if (!machine.visible)
                 frames.remove(machine);
+
+            if (machine.problem) {
+                frames.remove(machine);
+                packages.remove(machine);
+            }
+
             update_machines();
             if (machines.loaded)
-                navigate();
+                navigate(false);
             maybe_ready();
         })
         .on("removed", function(ev, machine) {
@@ -224,8 +256,16 @@ define([
              * to know when it can switch into the frame and inject
              * its own additions.
              */
-
             $(frame).on("load", function() {
+                /*
+                 * if the frame is reloaded directly
+                 * unregister and reregister to ensure
+                 * fresh channels
+                 */
+                $(this.contentWindow).on("unload", function () {
+                    router.unregister(frame.contentWindow);
+                    router.register(frame.contentWindow, address);
+                });
                 $(this).attr('data-loaded', true);
                 phantom_checkpoint();
                 $(this.contentWindow).on('hashchange', function () {
@@ -278,13 +318,22 @@ define([
         }
     });
 
-    function navigate() {
+    function show_connecting() {
+        $("#sidebar").hide();
+        $("#connecting").show();
+    }
+
+    function navigate(reconnect) {
         var path = cockpit.location.path;
         var options = cockpit.location.options;
 
         var address = null;
         var component = null;
         var machine = null;
+
+        /* If this is a watchdog problem let the dialog handle it */
+        if (watchdog_problem)
+            return;
 
         /* Main dashboard listing */
         var listing = manifests["dashboard"];
@@ -305,14 +354,18 @@ define([
         }
 
         if (address) {
+            machine = machines.lookup(address);
 
             /* If the machine is not available, then redirect to dashboard */
-            machine = machines.lookup(address);
-            if (!machine) {
-                if (listing)
+            if (!machine || machine.problem) {
+                if (machine && reconnect && machine.problem) {
+                    machines.connect(machine.address);
+                    show_connecting();
+                } else if (listing) {
                     cockpit.location.go("/dashboard/list");
-                else
+                } else {
                     cockpit.location.go("/");
+                }
                 return;
             }
 
@@ -335,12 +388,17 @@ define([
             }
         }
 
-        current_location = "/" + path.slice(0, at).join("/");
+        current_location = cockpit.location.encode(path.slice(0, at));
         current_address = address;
+
+        if (machine && machine.state == "connecting")
+            show_connecting();
+        else
+           $("#connecting").hide();
 
         update_navbar(machine, component);
         update_sidebar(machine, component);
-        update_frame(machine, component, "/" + path.slice(at).join("/"), options);
+        update_frame(machine, component, cockpit.location.encode(path.slice(at)), options);
 
         recalculate_layout();
     }
@@ -363,14 +421,17 @@ define([
         $("#machine-avatar").attr("src", machine ? encodeURI(machine.avatar) : "images/server-small.png");
         $("#machine-dropdown").toggleClass("active", !!machine);
 
-        var label;
-        if (machine)
+        var label, title;
+        if (machine) {
             label = machine.label;
-        else if (machines.list.length == 1)
+            title = machine.label;
+        } else if (machines.list.length == 1) {
             label = machines.list[0].label;
-        else
+        } else {
             label = _("Machines");
+        }
         $("#machine-link span").text(label);
+        $("title").text(title || default_title);
 
         var color;
         if (machines.list.length == 1 || !machine)
@@ -396,8 +457,15 @@ define([
             return;
         }
 
-        /* TODO: We need to fix races here with quick navigation in succession */
+        /*
+         * This will be called again when the
+         * state is either connected or failed
+         * better to wait till then
+         */
+        if (machine.state == "connecting")
+            return;
 
+        /* TODO: We need to fix races here with quick navigation in succession */
         function links(component) {
             var href = "#";
             if (machine.address != "localhost" || component.path) {
@@ -413,15 +481,19 @@ define([
         }
 
         packages.lookup(machine, function(components) {
-            packages.loaded = true;
             var menu = components.menu.map(links);
-            $("#sidebar-menu").empty().append(menu);
             var tools = components.tools.map(links);
-            $("#sidebar-tools").empty().append(tools);
 
-            maybe_ready();
-            sidebar.show();
-            recalculate_layout();
+            packages.loaded = true;
+            /* only update if we are still on the same address */
+            if (machine.address == current_address) {
+                $("#sidebar-menu").empty().append(menu);
+                $("#sidebar-tools").empty().append(tools);
+
+                maybe_ready();
+                sidebar.show();
+                recalculate_layout();
+            }
         });
     }
 
@@ -436,21 +508,6 @@ define([
             if (component == "system/host") {
                 component = "shell/shell";
                 hash = "/server" + hash;
-            } else if (component == "docker/containers") {
-                component = "shell/shell";
-                hash = "/containers" + hash;
-            } else if (component == "network/interfaces") {
-                component = "shell/shell";
-                hash = "/networking" + hash;
-            } else if (component == "storage/devices") {
-                component = "shell/shell";
-                hash = "/storage" + hash;
-            } else if (component == "users/local") {
-                component = "shell/shell";
-                if (options && options.id)
-                    hash = "/account";
-                else
-                    hash = "/accounts";
             }
         } else {
             dashboard = true;
@@ -572,12 +629,13 @@ define([
                 var parts = component.split("/");
 
                 var base;
+                var checksum = checksums[address];
                 if (address == "localhost")
                     base = "..";
-                else if (machine.checksum)
-                    base = "../../" + machine.checksum;
+                else if (checksum)
+                    base = "../../" + checksum;
                 else
-                    base = "../../@" + machine.address;
+                    base = "../../@" + address;
 
                 frame.url = base + "/" + component + ".html";
                 frame.setAttribute('src', frame.url + "#" + hash);
@@ -677,6 +735,12 @@ define([
                         perform_jump(control);
                     return;
 
+                } else if (control.command === "hint") {
+                    /* watchdog handles current host for now */
+                    if (control.hint == "restart" && control.host != cockpit.transport.host)
+                        machines.expect_restart(control.host);
+                    return;
+
                 } else if (control.command == "oops") {
                     if (setup_oops())
                         oops.show();
@@ -742,6 +806,7 @@ define([
     function Packages() {
         var self = this;
         var requests = [ ];
+        var machine_components = {};
 
         function Components(manis) {
             this.menu = [ ];
@@ -780,35 +845,45 @@ define([
             return new Components(manis);
         };
 
-        self.lookup = function lookup(machine, callback) {
-            if (!machine.components && machine.address == "localhost")
-                machine.components = self.build(manifests);
+        self.remove = function build(machine) {
+            delete checksums[machine.address];
+            delete machine_components[machine.address];
+        };
 
-            if (machine.components) {
-                callback(machine.components);
+        self.lookup = function lookup(machine, callback) {
+            var components = machine_components[machine.address];
+            if (!components && machine.address == "localhost") {
+                components = self.build(manifests);
+                machine_components[machine.address] = components;
+            }
+
+            if (components) {
+                callback(components);
                 return;
             }
 
             var url;
+            var checksum = checksums[machine.address];
             if (machine.checksum)
-                url = "../../" + machine.checksum + "/manifests.json";
+                url = "../../" + checksum + "/manifests.json";
             else
                 url = "../../@" + machine.address + "/manifests.json";
 
             var req = $.ajax({ url: url, dataType: "json", cache: true})
                 .done(function(manis) {
-                    machine.components = self.build(manis);
+                    components = self.build(manis);
                     var etag = req.getResponseHeader("ETag");
                     if (etag) /* and remove quotes */
-                        machine.checksum = etag.replace(/^"(.+)"$/, '$1');
+                        checksums[machine.address] = etag.replace(/^"(.+)"$/, '$1');
                 })
                 .fail(function(ex) {
                     console.warn("failed to load manifests from " + machine.address + ": " + ex);
-                    machine.components = self.build({ });
+                    components = self.build({ });
                 })
                 .always(function() {
                     req.pending = false;
-                    callback(machine.components);
+                    machine_components[machine.address] = components;
+                    callback(components);
                 });
 
             req.pending = true;

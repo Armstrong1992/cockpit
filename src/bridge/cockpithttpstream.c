@@ -32,109 +32,141 @@
 #include <string.h>
 
 /**
- * CockpitHttpConnection
+ * CockpitHttpClient
  *
- * A pooled raw HTTP connection. We close this after a short timeout
- * to try to preempt the server closing it.
+ * Information about a certain set of HTTP connections that
+ * have been given a connection name, grouping them together as
+ * a client. In this mode we cache connections and reuse them
+ * as well as share options and address info.
  */
 
 typedef struct {
+  gint refs;
   gchar *name;
+  gchar *host;
+  GSocketConnectable *connectable;
+  CockpitStreamOptions *options;
   CockpitStream *stream;
   gulong sig_close;
   guint timeout;
-} CockpitHttpConnection;
+} CockpitHttpClient;
 
-static GHashTable *connection_pool;
+static GHashTable *clients;
 
 static void
-cockpit_http_connection_free (gpointer data)
+cockpit_http_client_reset (CockpitHttpClient *client)
 {
-  CockpitHttpConnection *connection = data;
-  if (connection->timeout)
-    g_source_remove (connection->timeout);
-  if (connection->stream)
+  if (client->timeout)
+    g_source_remove (client->timeout);
+  if (client->stream)
     {
-      g_signal_handler_disconnect (connection->stream, connection->sig_close);
-      cockpit_stream_close (connection->stream, NULL);
-      g_object_unref (connection->stream);
+      g_signal_handler_disconnect (client->stream, client->sig_close);
+      g_object_unref (client->stream);
     }
-  g_free (connection->name);
-  g_slice_free (CockpitHttpConnection, connection);
+
+  client->sig_close = 0;
+  client->stream = NULL;
+  client->timeout = 0;
 }
 
 static void
-cockpit_http_connection_remove (const gchar *name)
+cockpit_http_client_unref (gpointer data)
 {
-  if (connection_pool)
+  CockpitHttpClient *client = data;
+  if (--client->refs == 0)
     {
-      g_hash_table_remove (connection_pool, name);
-      if (g_hash_table_size (connection_pool) == 0)
-        {
-          g_hash_table_destroy (connection_pool);
-          connection_pool = NULL;
-        }
+      cockpit_http_client_reset (client);
+      if (client->connectable)
+        g_object_unref (client->connectable);
+      if (client->options)
+        cockpit_stream_options_unref (client->options);
+      g_free (client->name);
+      g_free (client->host);
+      g_slice_free (CockpitHttpClient, client);
     }
 }
 
-static void
-on_connection_close (CockpitStream *stream,
-                     const gchar *problem,
-                     gpointer data)
+static CockpitHttpClient *
+cockpit_http_client_ref (CockpitHttpClient *client)
 {
-  CockpitHttpConnection *connection = data;
-  g_debug ("%s: pooled connection closed", connection->name);
-  cockpit_http_connection_remove (connection->name);
+  client->refs++;
+  return client;
+}
+
+static void
+on_client_close (CockpitStream *stream,
+                 const gchar *problem,
+                 gpointer data)
+{
+  CockpitHttpClient *client = data;
+  g_debug ("%s: connection closed", client->name);
+  cockpit_http_client_reset (client);
 }
 
 static gboolean
-on_connection_timeout (gpointer data)
+on_client_timeout (gpointer data)
 {
-  CockpitHttpConnection *connection = data;
-  g_debug ("%s: pooled timed out", connection->name);
-  cockpit_http_connection_remove (connection->name);
+  CockpitHttpClient *client = data;
+  g_debug ("%s: connection timed out", client->name);
+  cockpit_http_client_reset (client);
   return FALSE;
 }
 
-static void
-cockpit_http_connection_checkin (const gchar *name,
-                                 CockpitStream *stream)
+static CockpitHttpClient *
+cockpit_http_client_ensure (const gchar *name)
 {
-  CockpitHttpConnection *connection;
+  CockpitHttpClient *client = NULL;
 
-  connection = g_slice_new0 (CockpitHttpConnection);
-  connection->name = g_strdup (name);
-  connection->stream = g_object_ref (stream);
-  connection->sig_close = g_signal_connect (stream, "close", G_CALLBACK (on_connection_close), connection);
-  connection->timeout = g_timeout_add_seconds (10, on_connection_timeout, connection);
+  if (name)
+    {
+      if (!clients)
+        clients = g_hash_table_new_full (g_str_hash, g_str_equal, NULL, cockpit_http_client_unref);
+      client = g_hash_table_lookup (clients, name);
+    }
 
-  if (!connection_pool)
-    connection_pool = g_hash_table_new_full (g_str_hash, g_str_equal, NULL, cockpit_http_connection_free);
+  if (!client)
+    {
+      client = g_slice_new0 (CockpitHttpClient);
+      client->name = g_strdup (name);
 
-  g_debug ("%s: pooling connection", connection->name);
-  g_hash_table_replace (connection_pool, connection->name, connection);
+      if (clients && name)
+        {
+          g_debug ("%s: registering client", name);
+          g_hash_table_replace (clients, client->name, cockpit_http_client_ref (client));
+        }
+    }
+  else if (name)
+    {
+      g_debug ("%s: using client", name);
+    }
+
+  cockpit_http_client_ref (client);
+  return client;
+}
+
+static void
+cockpit_http_client_checkin (CockpitHttpClient *client,
+                             CockpitStream *stream)
+{
+  cockpit_http_client_reset (client);
+  client->stream = g_object_ref (stream);
+  client->sig_close = g_signal_connect (stream, "close", G_CALLBACK (on_client_close), client);
+  client->timeout = g_timeout_add_seconds (10, on_client_timeout, client);
 }
 
 static CockpitStream *
-cockpit_http_connection_checkout (const gchar *name)
+cockpit_http_client_checkout (CockpitHttpClient *client)
 {
-  CockpitHttpConnection *connection;
-  CockpitStream *stream;
+  CockpitStream *stream = NULL;
 
-  if (!connection_pool)
-    return NULL;
+  if (client->stream)
+    {
+      g_debug ("%s: reusing connection", client->name);
 
-  connection = g_hash_table_lookup (connection_pool, name);
-  if (!connection)
-    return NULL;
+      stream = g_object_ref (client->stream);
+      cockpit_http_client_reset (client);
+    }
 
-  g_debug ("%s: reusing pooled connection", connection->name);
-
-  stream = connection->stream;
-  g_signal_handler_disconnect (connection->stream, connection->sig_close);
-  connection->stream = NULL;
-
-  cockpit_http_connection_remove (name);
   return stream;
 }
 
@@ -168,7 +200,7 @@ typedef struct _CockpitHttpStream {
 
   /* The nickname for debugging and logging */
   gchar *name;
-  const gchar *connection;
+  CockpitHttpClient *client;
 
   /* The connection */
   CockpitStream *stream;
@@ -333,6 +365,11 @@ relay_headers (CockpitHttpStream *self,
       goto out;
     }
 
+  g_debug ("%s: response: %u %s", self->name, status, reason);
+  g_hash_table_iter_init (&iter, headers);
+  while (g_hash_table_iter_next (&iter, &key, &value))
+    g_debug ("%s: header: %s %s", self->name, (gchar *)key, (gchar *)value);
+
   if (!parse_transfer_encoding (self, headers) ||
       !parse_content_length (self, status, headers) ||
       !parse_keep_alive (self, version, headers))
@@ -353,15 +390,11 @@ relay_headers (CockpitHttpStream *self,
   object = json_object_new ();
   json_object_set_int_member (object, "status", status);
   json_object_set_string_member (object, "reason", reason);
-  g_debug ("%s: response: %u %s", self->name, status, reason);
 
   heads = json_object_new();
   g_hash_table_iter_init (&iter, headers);
   while (g_hash_table_iter_next (&iter, &key, &value))
-    {
-      g_debug ("%s: header: %s %s", self->name, (gchar *)key, (gchar *)value);
-      json_object_set_string_member (heads, key, value);
-    }
+    json_object_set_string_member (heads, key, value);
 
   json_object_set_object_member (object, "headers", heads);
   message = cockpit_json_write_bytes (object);
@@ -732,6 +765,8 @@ send_http_request (CockpitHttpStream *self)
       goto out;
     }
 
+  g_debug ("%s: sending %s request", self->name, method);
+
   string = g_string_sized_new (128);
   g_string_printf (string, "%s %s HTTP/1.1\r\n", method, path);
 
@@ -785,7 +820,7 @@ send_http_request (CockpitHttpStream *self)
     }
 
   if (!had_host)
-    g_string_append_printf (string, "Host: %s\r\n", self->name);
+    g_string_append_printf (string, "Host: %s\r\n", self->client->host);
   if (!had_encoding)
     g_string_append (string, "Accept-Encoding: identity\r\n");
 
@@ -838,7 +873,6 @@ cockpit_http_stream_done (CockpitChannel *channel)
   CockpitHttpStream *self = COCKPIT_HTTP_STREAM (channel);
 
   g_return_if_fail (self->state == BUFFER_REQUEST);
-  g_debug ("%s: sending request", self->name);
   self->state = RELAY_REQUEST;
   send_http_request (self);
 }
@@ -862,11 +896,11 @@ cockpit_http_stream_close (CockpitChannel *channel,
       cockpit_channel_done (channel);
 
       /* Save this for another round? */
-      if (self->keep_alive && self->connection)
+      if (self->keep_alive)
         {
           g_signal_handler_disconnect (self->stream, self->sig_read);
           g_signal_handler_disconnect (self->stream, self->sig_close);
-          cockpit_http_connection_checkin (self->connection, self->stream);
+          cockpit_http_client_checkin (self->client, self->stream);
           g_object_unref (self->stream);
           self->stream = NULL;
         }
@@ -894,10 +928,13 @@ static void
 cockpit_http_stream_prepare (CockpitChannel *channel)
 {
   CockpitHttpStream *self = COCKPIT_HTTP_STREAM (channel);
-  CockpitStreamOptions *stream_options = NULL;
   GSocketConnectable *connectable = NULL;
+  CockpitStreamOptions *opts = NULL;
   const gchar *connection;
   JsonObject *options;
+  const gchar *path;
+  gchar *host = NULL;
+  gboolean local = FALSE;
 
   COCKPIT_CHANNEL_CLASS (cockpit_http_stream_parent_class)->prepare (channel);
 
@@ -907,30 +944,69 @@ cockpit_http_stream_prepare (CockpitChannel *channel)
   options = cockpit_channel_get_options (channel);
   if (!cockpit_json_get_string (options, "connection", NULL, &connection))
     {
-      g_warning ("%s: bad \"connection\" field in HTTP stream request", self->name);
+      g_warning ("bad \"connection\" field in HTTP stream request");
       cockpit_channel_close (channel, "protocol-error");
       goto out;
     }
 
-  if (connection)
+  if (!cockpit_json_get_string (options, "path", "/", &path))
     {
-      self->name = g_strdup (connection);
-      self->connection = self->name;
+      g_warning ("bad \"path\" field in HTTP stream request");
+      cockpit_channel_close (channel, "protocol-error");
+      goto out;
     }
 
-  self->stream = cockpit_http_connection_checkout (self->connection);
-  if (!self->stream)
-    {
-      stream_options = cockpit_channel_parse_stream (channel);
-      if (!stream_options)
-        goto out;
+  self->client = cockpit_http_client_ensure (connection);
 
-      connectable = cockpit_channel_parse_connectable (channel, self->name ? NULL : &self->name);
+  if (!self->client->connectable ||
+      json_object_has_member (options, "unix") ||
+      json_object_has_member (options, "port") ||
+      json_object_has_member (options, "internal") ||
+      json_object_has_member (options, "address"))
+    {
+      g_free (self->client->host);
+      self->client->host = NULL;
+      connectable = cockpit_channel_parse_connectable (channel, &host, &local);
       if (!connectable)
         goto out;
-
-      self->stream = cockpit_stream_connect (self->name, connectable, stream_options);
     }
+
+  if (!self->client->options ||
+      json_object_has_member (options, "tls"))
+    {
+      opts = cockpit_channel_parse_stream (channel, local);
+      if (!opts)
+        goto out;
+    }
+
+  if (connectable)
+    {
+      if (self->client->connectable)
+        g_object_unref (self->client->connectable);
+      self->client->connectable = connectable;
+      connectable = NULL;
+    }
+
+  if (host)
+    {
+      g_free (self->client->host);
+      self->client->host = host;
+      host = NULL;
+    }
+
+  if (opts)
+    {
+      if (self->client->options)
+        cockpit_stream_options_unref (self->client->options);
+      self->client->options = cockpit_stream_options_ref (opts);
+    }
+
+  self->name = g_strdup_printf ("%s://%s%s", self->client->options->tls_client ? "https" : "http",
+                                self->client->host, path);
+
+  self->stream = cockpit_http_client_checkout (self->client);
+  if (!self->stream)
+    self->stream = cockpit_stream_connect (self->name, self->client->connectable, self->client->options);
 
   /* Parsed elsewhere */
   self->binary = json_object_has_member (options, "binary");
@@ -943,8 +1019,8 @@ cockpit_http_stream_prepare (CockpitChannel *channel)
 out:
   if (connectable)
     g_object_unref (connectable);
-  if (stream_options)
-    cockpit_stream_options_unref (stream_options);
+  if (opts)
+    cockpit_stream_options_unref (opts);
 }
 
 static void
@@ -972,8 +1048,22 @@ cockpit_http_stream_finalize (GObject *object)
   CockpitHttpStream *self = COCKPIT_HTTP_STREAM (object);
 
   g_free (self->name);
+  if (self->client)
+    cockpit_http_client_unref (self->client);
 
   G_OBJECT_CLASS (cockpit_http_stream_parent_class)->finalize (object);
+}
+
+static void
+cockpit_http_stream_constructed (GObject *object)
+{
+  const gchar *caps[] = { "tls-certificates",
+                          "address",
+                          NULL };
+
+  G_OBJECT_CLASS (cockpit_http_stream_parent_class)->constructed (object);
+
+  g_object_set (object, "capabilities", &caps, NULL);
 }
 
 static void
@@ -984,6 +1074,7 @@ cockpit_http_stream_class_init (CockpitHttpStreamClass *klass)
 
   gobject_class->dispose = cockpit_http_stream_dispose;
   gobject_class->finalize = cockpit_http_stream_finalize;
+  gobject_class->constructed = cockpit_http_stream_constructed;
 
   channel_class->prepare = cockpit_http_stream_prepare;
   channel_class->recv = cockpit_http_stream_recv;

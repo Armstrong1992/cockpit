@@ -21,10 +21,10 @@
 from testlib import *
 
 import os
-import shutil
 import subprocess
-import tempfile
+import unittest
 
+@unittest.skipIf("atomic" in os.environ.get("TEST_OS", ""), "atomic: missing bind-utils")
 class TestRealms(MachineCase):
 
     def testIpa(self):
@@ -62,16 +62,16 @@ class TestRealms(MachineCase):
         # Join cockpit.lan
         b.click("#system_information_realms_button")
         b.wait_popup("realms-op")
-	with b.wait_timeout(120):
-                b.set_val(".realms-op-address", "cockpit.lan")
-	        b.wait_attr(".realms-op-admin", "placeholder", 'e.g. "admin"')
-	        b.set_val(".realms-op-admin", "admin")
-	        b.set_val(".realms-op-admin-password", "foobarfoo")
-	        b.click(".realms-op-apply")
-	        b.wait_popdown("realms-op")
+        with b.wait_timeout(120):
+            b.set_val(".realms-op-address", "cockpit.lan")
+            b.wait_attr(".realms-op-admin", "placeholder", 'e.g. "admin"')
+            b.set_val(".realms-op-admin", "admin")
+            b.set_val(".realms-op-admin-password", "foobarfoo")
+            b.click(".realms-op-apply")
+            b.wait_popdown("realms-op")
 
-	        # Check that this has worked
-	        wait_number_domains(1)
+            # Check that this has worked
+            wait_number_domains(1)
 
         # Leave the domain
         b.click("#system_information_realms_button")
@@ -112,6 +112,9 @@ class TestRealms(MachineCase):
         b.click(".realms-op-cancel")
         b.wait_popdown("realms-op")
 
+        # HACK: https://bugzilla.redhat.com/show_bug.cgi?id=1256636
+        self.allow_journal_messages(".*type=1400 audit.*denied.*nsupdate.*nsswitch.conf.*realmd_var_lib_t.*")
+
 KRB5_TEMPLATE = """
 [logging]
  default = FILE:%(dir)s/krb5.log
@@ -150,6 +153,7 @@ ipa-getkeytab -q -s f0.cockpit.lan -p HTTP/x0.cockpit.lan -k /etc/krb5.keytab
 """
 
 # This is here because our test framework can't run ipa VM's twice
+@unittest.skipIf("atomic" in os.environ.get("TEST_OS", ""), "atomic: missing bind-utils")
 class TestKerberos(MachineCase):
     def setUp(self):
         self.ipa = self.new_machine(flavor="ipa")
@@ -159,7 +163,6 @@ class TestKerberos(MachineCase):
         MachineCase.setUp(self)
 
         # Setup a place for kerberos caches
-        self.tmpdir = tempfile.mkdtemp()
         self.ccache = "%s/krb5cc" % self.tmpdir
         os.environ['KRB5CCNAME'] = self.ccache
         self.config = "%s/krb5.conf" % self.tmpdir
@@ -181,8 +184,6 @@ class TestKerberos(MachineCase):
         self.assertEqual(proc.wait(), 0)
 
     def tearDown(self):
-        shutil.rmtree(self.tmpdir)
-
         del os.environ['KRB5CCNAME']
         del os.environ['KRB5_CONFIG']
 

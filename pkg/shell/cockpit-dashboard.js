@@ -24,6 +24,7 @@ define([
     "shell/controls",
     "shell/shell",
     "shell/machines",
+    "base1/patterns",
     "shell/cockpit-main"
 ], function($, cockpit, Mustache, controls, shell, machines) {
 "use strict";
@@ -147,36 +148,33 @@ $(function () {
         });
 });
 
-function show_problem_dialog(machine) {
-    $('#reconnect-dialog-summary').text(
-        cockpit.format(_("Couldn't establish connection to $0."), machine.display_name));
-    $('#reconnect-dialog-problem').text(cockpit.message(machine.problem));
-    $('#reconnect-dialog-reconnect').off('click');
-    $('#reconnect-dialog-reconnect').on('click', function () {
-        $('#reconnect-dialog').modal('hide');
-        machine.connect();
-    });
-    $('#reconnect-dialog').modal('show');
-}
-
-function host_edit_dialog(machine) {
+function host_edit_dialog(machine_manager, host) {
+    var machine = machine_manager.lookup(host);
     if (!machine)
         return;
 
+    var dlg = $("#host-edit-dialog");
     $('#host-edit-fail').text("").hide();
     $('#host-edit-name').val(machine.label);
     $('#host-edit-name').prop('disabled', machine.state == "failed");
     $('#host-edit-color').css('background-color', machine.color);
     $('#host-edit-apply').off('click');
     $('#host-edit-apply').on('click', function () {
-        $('#host-edit-dialog').modal('hide');
+        dlg.dialog('failure', null);
         var values = {
             avatar: avatar_editor.changed ? avatar_editor.get_data(128, 128, "image/png") : null,
             color: $('#host-edit-color').css('background-color'),
             label: $('#host-edit-name').val()
         };
-        machine.change(values)
-            .fail(shell.show_unexpected_error);
+        var promise = machine_manager.change(machine.key, values);
+        promise
+            .done(function() {
+                dlg.modal('hide');
+            })
+            .fail(function(ex) {
+                dlg.dialog('failure', ex);
+            });
+        dlg.dialog('wait', promise);
     });
     $('#host-edit-avatar').off('click');
     $('#host-edit-avatar').on('click', function () {
@@ -188,7 +186,7 @@ function host_edit_dialog(machine) {
                 avatar_editor.start_cropping();
             });
     });
-    $('#host-edit-dialog').modal('show');
+    dlg.modal('show');
 
     avatar_editor.stop_cropping();
     avatar_editor.load_data(machine.avatar || "images/server-large.png").
@@ -221,13 +219,14 @@ PageDashboard.prototype = {
         var self = this;
         self.edit_enabled = val;
         $('#dashboard-enable-edit').toggleClass('active', self.edit_enabled);
+        $('.os').toggleClass('hidden', self.edit_enabled);
         $('#dashboard-hosts').toggleClass('editable', self.edit_enabled);
     },
 
     setup: function() {
         var self = this;
 
-        this.machines = machines.instance();
+        self.machines = machines.instance();
 
         function make_color_div(c) {
             return $('<div class="color-cell">').
@@ -259,10 +258,7 @@ PageDashboard.prototype = {
         });
 
         var renderer = host_renderer($("#dashboard-hosts .list-group"));
-        $(self.machines).on("added.dashboard", function(ev, machine) {
-            machine.connect();
-            renderer();
-        });
+        $(self.machines).on("added.dashboard", renderer);
         $(self.machines).on("removed.dashboard", renderer);
         $(self.machines).on("changed.dashboard", renderer);
 
@@ -287,27 +283,22 @@ PageDashboard.prototype = {
             .on("click", "a.list-group-item", function() {
                 if (self.edit_enabled)
                     return false;
-                var addr = $(this).attr("data-address");
-                var machine = self.machines.lookup(addr);
-                if (machine.state == "failed") {
-                    show_problem_dialog(machine);
-                    return false;
-                }
             })
             .on("click", "button.pficon-delete", function() {
                 var item = $(this).parent(".list-group-item");
                 self.toggle_edit(false);
                 var machine = self.machines.lookup(item.attr("data-address"));
                 if (machine) {
-                    machine.change({ visible: false });
-                    machine.close();
+                    self.machines.change(machine.key, { visible: false });
+                    self.machines.disconnect(machine.key);
                 }
                 return false;
             })
             .on("click", "button.pficon-edit", function() {
                 var item = $(this).parent(".list-group-item");
+                var host = item.attr("data-address");
                 self.toggle_edit(false);
-                host_edit_dialog(self.machines.lookup(item.attr("data-address")));
+                host_edit_dialog(self.machines, host);
                 return false;
             })
             .on("mouseenter", "a.list-group-item", function() {
@@ -387,10 +378,26 @@ PageDashboard.prototype = {
                     return "images/server-small.png";
             }
 
+            function avatar_display() {
+                if (this.restarting)
+                    return "hidden";
+                else
+                    return "";
+            }
+
+            function connecting_display() {
+                if (this.restarting)
+                    return "";
+                else
+                    return "hidden";
+            }
+
             function render() {
                 var text = Mustache.render(template, {
                     machines: self.machines.list,
-                    render_avatar: render_avatar
+                    render_avatar: render_avatar,
+                    avatar_display: avatar_display,
+                    connecting_display: connecting_display
                 });
 
                 target.html(text);
@@ -403,7 +410,22 @@ PageDashboard.prototype = {
                 update_series();
             }
 
-            return render;
+            /* delay and throttle rendering
+               events shouldn't fire continuously anyway,
+               so in case of a burst it's better to wait a bit before we start rendering
+             */
+            function throttled_render() {
+                var timer = null;
+                return function() {
+                    if (timer === null) {
+                        timer = window.setTimeout(function () {
+                            timer = null;
+                            render();
+                        }, 500);
+                    }
+                };
+            }
+            return throttled_render();
         }
 
         function plot_refresh() {

@@ -308,20 +308,13 @@ function Transport() {
             }
         }
 
-        /* HACK - we allow for one minute of silence since some
-         *        versions of NetworkManager seem to cause a total
-         *        network blackout of 30 seconds or so when making
-         *        configuration changes.
-         *
-         * https://bugzilla.redhat.com/show_bug.cgi?id=1211287
-         */
         check_health_timer = window.setInterval(function () {
             if (!got_message) {
                 console.log("health check failed");
                 self.close({ "problem": "timeout" });
             }
             got_message = false;
-        }, 60000);
+        }, 10000);
     }
 
     if (!ws) {
@@ -818,6 +811,10 @@ function basic_scope(cockpit) {
         return new Channel(options);
     };
 
+    /* ------------------------------------------------------------
+     * Text Encoding
+     */
+
     function Utf8TextEncoder(constructor) {
         var self = this;
         self.encoding = "utf-8";
@@ -924,6 +921,20 @@ function basic_scope(cockpit) {
             options.host = host;
         if (group)
             options.group = group;
+        ensure_transport(function(transport) {
+            transport.send_control(options);
+        });
+    };
+
+    /* Not public API ... yet? */
+    cockpit.hint = function hint(name, host) {
+        if (!host)
+            host = default_host;
+
+        var options = { "command": "hint",
+                        "hint": name,
+                        "host": host };
+
         ensure_transport(function(transport) {
             transport.send_control(options);
         });
@@ -1168,9 +1179,7 @@ function full_scope(cockpit, $, po) {
             path = "/" + path.map(encodeURIComponent).join("/").replace("%40", "@");
         else
             path = "" + path;
-        var options = { command: "jump", location: path };
-        if (host)
-            options.host = host;
+        var options = { command: "jump", location: path, host: host };
         cockpit.transport.inject("\n" + JSON.stringify(options));
     };
 
@@ -1266,6 +1275,17 @@ function full_scope(cockpit, $, po) {
         };
 
         return dfd.promise();
+    };
+
+    /* public */
+    cockpit.script = function(script, args, options) {
+        if (!options && $.isPlainObject(args)) {
+            options = args;
+            args = [];
+        }
+        var command = [ "/bin/sh", "-c", script, "--" ];
+        command.push.apply(command, args);
+        return cockpit.spawn(command, options);
     };
 
     function dbus_debug() {
@@ -1527,8 +1547,16 @@ function full_scope(cockpit, $, po) {
     function DBusClient(name, options) {
         var self = this;
         var args = { };
-        if (options)
+        var track = false;
+        var owner = null;
+
+        if (options) {
+            if (options.track)
+                track = true;
+
+            delete options['track'];
             $.extend(args, options);
+        }
         args.payload = "dbus-json3";
         args.name = name;
         self.options = options;
@@ -1603,9 +1631,18 @@ function full_scope(cockpit, $, po) {
             } else if (msg.meta) {
                 ensure_cache();
                 $.extend(cache.meta, msg.meta);
+            } else if (msg.owner !== undefined) {
+                $(self).triggerHandler("owner", [ msg.owner ]);
+
+                // We won't get this signal with the same
+                // owner twice so if we've seen an owner
+                // before that means it has changed.
+                if (track && owner)
+                    self.close();
+
+                owner = msg.owner;
             } else {
-                console.warn("received unexpected dbus json message:", payload);
-                channel.close({"problem": "protocol-error"});
+                dbus_debug("received unexpected dbus json message:", payload);
             }
         });
 
@@ -2316,6 +2353,12 @@ function full_scope(cockpit, $, po) {
             }
         }
 
+        if (options.address) {
+            if (!options.capabilities)
+                options.capabilities = [];
+            options.capabilities.push("address");
+        }
+
         self.request = function request(req) {
             var dfd = new $.Deferred();
 
@@ -2334,10 +2377,19 @@ function full_scope(cockpit, $, po) {
             var input = req.body;
             delete req.body;
 
-            if (!req.headers)
-                delete req.headers;
+            var headers = req.headers;
+            delete req.headers;
 
             $.extend(req, options);
+
+            /* Combine the headers */
+            if (options.headers && headers)
+                req.headers = $.extend({ }, options.headers, headers);
+            else if (options.headers)
+                req.headers = options.headers;
+            else
+                req.headers = headers;
+
             http_debug("http request:", JSON.stringify(req));
 
             /* We need a channel for the request */
@@ -2568,6 +2620,133 @@ function full_scope(cockpit, $, po) {
         return storage;
     }
 
+    function StorageCache(key, provider, consumer) {
+        var self = this;
+
+        /* For triggering events and ownership */
+        var trigger = window.sessionStorage;
+        var last;
+
+        var storage = lookup_storage(window);
+
+        var claimed = false;
+        var source;
+
+        function callback() {
+            /* Only run the callback if we have a result */
+            if (storage[key] !== undefined) {
+                if (consumer(storage[key], key) === false)
+                    self.close();
+            }
+        }
+
+        function result(value) {
+            if (source && !claimed)
+                claimed = true;
+            if (!claimed)
+                return;
+
+            // use a random number to avoid races by separate instances
+            var version = Math.floor(Math.random() * 10000000) + 1;
+
+            /* Event for the local window */
+            var ev = document.createEvent("StorageEvent");
+            ev.initStorageEvent("storage", false, false, key, null,
+                                version, window.location, trigger);
+
+            storage[key] = value;
+            trigger.setItem(key, version);
+            ev.self = self;
+            window.dispatchEvent(ev);
+        }
+
+        self.claim = function claim() {
+            if (!source)
+                source = provider(result, key);
+        };
+
+        function unclaim() {
+            if (source && source.close)
+                source.close();
+            source = null;
+
+            if (!claimed)
+                return;
+
+            claimed = false;
+
+            var current_value = trigger.getItem(key);
+            if (current_value)
+                current_value = parseInt(current_value, 10);
+            else
+                current_value = null;
+
+            if (last && last === current_value) {
+                var ev = document.createEvent("StorageEvent");
+                var version = trigger[key];
+                ev.initStorageEvent("storage", false, false, key, version,
+                                    null, window.location, trigger);
+                delete storage[key];
+                trigger.removeItem(key);
+                ev.self = self;
+                window.dispatchEvent(ev);
+            }
+        }
+
+        function changed(event) {
+            if (event.key !== key)
+                return;
+
+            /* check where the event came from
+               - it came from someone else:
+                   if it notifies their unclaim (new value null) and we haven't already claimed, do so
+               - it came from ourselves:
+                   if the new value doesn't match the actual value in the cache, and
+                   we tried to claim (from null to a number), cancel our claim
+             */
+            if (event.self !== self) {
+                if (!event.newValue && !claimed) {
+                    self.claim();
+                    return;
+                }
+            } else if (claimed && !event.oldValue && (event.newValue !== trigger.getItem(key))) {
+                unclaim();
+            }
+
+            var new_value = null;
+            if (event.newValue)
+                new_value = parseInt(event.newValue, 10);
+            if (last !== new_value) {
+                last = new_value;
+                callback();
+            }
+        }
+
+        self.close = function() {
+            window.removeEventListener("storage", changed, true);
+            unclaim();
+        };
+
+        window.addEventListener("storage", changed, true);
+
+        /* Always clear this data on unload */
+        window.addEventListener("beforeunload", function() {
+            self.close();
+        });
+        window.addEventListener("unload", function() {
+            self.close();
+        });
+
+        if (trigger.getItem(key))
+            callback();
+        else
+            self.claim();
+    }
+
+    cockpit.cache = function cache(key, provider, consumer) {
+        return new StorageCache(key, provider, consumer);
+    };
+
     /* ---------------------------------------------------------------------
      * Metrics
      *
@@ -2642,9 +2821,9 @@ function full_scope(cockpit, $, po) {
                             if (last) {
                                 data_len = data.length;
                                 last_len = last.length;
-                                for (j = 0; j < data_len; j++) {
+                                for (j = 0; j < last_len; j++) {
                                     dataj = data[j];
-                                    if (dataj === null) {
+                                    if (dataj === null || dataj === undefined) {
                                         data[j] = last[j];
                                     } else {
                                         dataj_len = dataj.length;
@@ -3160,6 +3339,24 @@ function full_scope(cockpit, $, po) {
         };
 
         self.walk = function walk() {
+            /* Don't overflow 32 signed bits with the interval since
+             * many browsers will mishandle it.  This means that plots
+             * that would make about one step every month don't walk
+             * at all, but I guess that is ok.
+             *
+             * For example,
+             * https://developer.mozilla.org/en-US/docs/Web/API/WindowTimers/setTimeout
+             * says:
+             *
+             *    Browsers including Internet Explorer, Chrome,
+             *    Safari, and Firefox store the delay as a 32-bit
+             *    signed Integer internally. This causes an Integer
+             *    overflow when using delays larger than 2147483647,
+             *    resulting in the timeout being executed immediately.
+             */
+            if (self.interval > 2000000000)
+                return;
+
             stop_walking();
             offset = $.now() - self.beg * self.interval;
             walking = window.setInterval(function() {
@@ -3187,15 +3384,20 @@ function full_scope(cockpit, $, po) {
      * involving cockpit.transport or any of that logic.
      */
 
+    cockpit.oops = function oops() {
+        if (window.parent !== window &&
+            window.parent.options && window.parent.options.sink &&
+            window.parent.options.protocol == "cockpit1") {
+            window.parent.postMessage("\n{ \"command\": \"oops\" }", origin);
+        }
+    };
+
     var old_onerror;
 
-    if (window.navigator.userAgent.indexOf("PhantomJS") == -1 &&
-        window.parent !== window &&
-        window.parent.options && window.parent.options.sink &&
-        window.parent.options.protocol == "cockpit1") {
+    if (window.navigator.userAgent.indexOf("PhantomJS") == -1) {
         old_onerror = window.onerror;
         window.onerror = function(msg, url, line) {
-            window.parent.postMessage("\n{ \"command\": \"oops\" }", origin);
+            cockpit.oops();
             if (old_onerror)
                 return old_onerror(msg, url, line);
             return false;

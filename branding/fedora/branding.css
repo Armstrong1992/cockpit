@@ -1,14 +1,26 @@
+body.login-pf {
+    background: url("/cockpit/static/bg-login.jpg") no-repeat 50% 0;
+    background-size: auto;
+    background-color: #101010;
+}
 
-/* Fedora 21 Server branding */
+#badge {
+    width: 225px;
+    height: 80px;
+    background-image: url("/cockpit/static/logo.png");
+    background-size: contain;
+}
+
+#brand {
+    font-size: 18pt;
+    text-transform: uppercase;
+    content: "${NAME} <b>${VARIANT}</b>";
+}
+
+#index-brand {
+    content: "${NAME} <b>${VARIANT}</b>";
+}
+
 .navbar-pf .navbar-brand {
-    padding: 0 !important;
-    height: 24px;
-}
-
-.login-unstable {
-    display: none;
-}
-
-.login-stable {
-    display: block;
+    padding: 2px 0;
 }

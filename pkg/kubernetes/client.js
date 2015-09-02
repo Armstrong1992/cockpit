@@ -19,20 +19,25 @@
 
 define([
     "jquery",
-    "base1/cockpit"
-], function($, cockpit) {
+    "base1/cockpit",
+    "kubernetes/config"
+], function($, cockpit, config) {
     "use strict";
 
     var kubernetes = { };
     var _ = cockpit.gettext;
 
+    var API_KUBE = "/api";
+    var API_OPENSHIFT = "/oapi";
+
+    var TYPE_APIS = {
+        "images" : API_OPENSHIFT,
+        "imagestreams" : API_OPENSHIFT,
+    };
+
     function debug() {
         if (window.debugging == "all" || window.debugging == "kubernetes")
             console.debug.apply(console, arguments);
-    }
-
-    function failure(ex) {
-        console.warn(ex);
     }
 
     function hash(str) {
@@ -45,6 +50,24 @@ define([
             h |= 0; // Convert to 32bit integer
         }
         return Math.abs(h);
+    }
+
+    function search(arr, val) {
+        var low = 0;
+        var high = arr.length - 1;
+        var mid, v;
+
+        while (low <= high) {
+            mid = (low + high) / 2 | 0;
+            v = arr[mid];
+            if (v < val)
+                low = mid + 1;
+            else if (v > val)
+                high = mid - 1;
+            else
+                return mid; /* key found */
+        }
+        return low;
     }
 
     /**
@@ -61,17 +84,57 @@ define([
         var array = [];
 
         self.add = function add(keys, value) {
-            var i, j, p, length = keys.length;
+            var i, j, p, x, length = keys.length;
             for (j = 0; j < length; j++) {
                 i = hash("" + keys[j]) % size;
                 p = array[i];
                 if (p === undefined)
                     p = array[i] = [];
-                p.push(value);
+                x = search(p, value);
+                if (p[x] != value)
+                    p.splice(x, 0, value);
             }
         };
 
-        self.select = function select(keys) {
+        self.all = function all(keys) {
+            var i, j, p, result, n;
+            var rl, rv, pv, ri, px;
+
+            for (j = 0, n = keys.length; j < n; j++) {
+                i = hash("" + keys[j]) % size;
+                p = array[i];
+
+                /* No match for this key, short cut out */
+                if (!p) {
+                    result = [];
+                    break;
+                }
+
+                /* First key */
+                if (!result) {
+                    result = p.slice();
+
+                /* Calculate intersection */
+                } else {
+                    for (ri = 0, px = 0, rl = result.length; ri < rl; ) {
+                        rv = result[ri];
+                        pv = p[ri + px];
+                        if (pv < rv) {
+                            px += 1;
+                        } else if (rv !== pv) {
+                            result.splice(ri, 1);
+                            rl -= 1;
+                        } else {
+                            ri += 1;
+                        }
+                    }
+                }
+            }
+
+            return result || [];
+        };
+
+        self.any = function any(keys) {
             var i, j, interim = [], length = keys.length;
             for (j = 0; j < length; j++) {
                 i = hash("" + keys[j]) % size;
@@ -90,31 +153,119 @@ define([
         };
     }
 
+    function update_error_message(ex, response) {
+        if (!response)
+            return;
+
+        var obj;
+        try {
+            obj = JSON.parse(response);
+        } catch(e) {
+            return;
+        }
+
+        if (obj && obj.message)
+            ex.message = obj.message;
+    }
+
     /*
      * KubernetesWatch:
-     * @api: a cockpit.http() object for the api server
-     * @type: a string like 'pods' or 'nodes'
+     * @kind: a string like 'Pod' or 'Node'
+     * @endpoint: either /api or /oapi
      * @update: invoked when ADDED or MODIFIED happens
      * @remove: invoked when DELETED happens
      *
      * Generates callbacks based on a Kubernetes watch.
      *
-     * Each KubernetesWatch object watches a single type of object
-     * in Kubernetes. The URI watched is /api/v1beta3/watch/<type>
+     * Each KubernetesWatch object watches a single kind of object
+     * in Kubernetes.
      *
      * In addition to the above noted invocations of the callbacks,
      * if there is an ERROR, we restart the watch and invoke the
      * @remove callback with a null argument to indicate we are
      * starting over.
      */
-    function KubernetesWatch(api, type, update, remove) {
+    function KubernetesWatch(type, endpoint, update, remove) {
         var self = this;
 
+        /* Used to track the last resource for restarting query */
         var lastResource;
+
+        /* Whether close has been called */
         var stopping = false;
+
+        /* The current HTTP request */
         var req = null;
-        var wait = null;
+
+        /* The API that we make HTTP requests to */
+        var api = null;
+
+        /*
+         * Loading logic.
+         *
+         * For performance, we only use watches here. So we have
+         * to guess when loading is finished and when updates begin.
+         * There are several heuristics:
+         *
+         *  1) Receiving a MODIFY or DELETE means loading has finished.
+         *  2) A timeout after last ADDED
+         *  3) Error or connection closed.
+         *
+         * Remember that a watch object can restart its request for a number
+         * of reasons, and so the loading/loaded state may go back and forth.
+         *
+         * When transitioning from a loading to a loaded state, we have to:
+         *  a) Notify the caller if not already done
+         *  b) See if any objects present before load need to be removed.
+         */
+
+        var loaded = $.Deferred();
         var objects = { };
+        var previous;
+        var loading;
+
+        function load_begin(full) {
+            if (full) {
+                previous = objects;
+                objects = { };
+            } else {
+                previous = null;
+            }
+            load_poke(true);
+        }
+
+        function load_poke(force) {
+            if (force || loading !== undefined) {
+                window.clearTimeout(loading);
+                loading = window.setTimeout(load_ready, 150);
+            }
+        }
+
+        function load_ready() {
+            var key, prev;
+
+            if (loading !== undefined) {
+                window.clearTimeout(loading);
+                loading = undefined;
+
+                /* Notify caller about objects gone after reload */
+                prev = previous;
+                previous = null;
+                if (prev) {
+                    for (key in prev) {
+                        if (!(key in objects)) {
+                            remove(prev[key], type);
+                        }
+                    }
+                }
+            }
+
+            if (!loaded.called) {
+                loaded.called = true;
+                if (loaded.state() == 'pending')
+                    loaded.resolve();
+            }
+        }
 
         /*
          * Each change is sent as an individual line from Kubernetes
@@ -139,7 +290,7 @@ define([
                 try {
                     action = JSON.parse(lines[i]);
                 } catch (ex) {
-                    failure(ex);
+                    console.warn(ex);
                     req.close();
                     continue;
                 }
@@ -150,41 +301,50 @@ define([
                     continue;
                 }
 
+                /* The watch failed, likely due to invalid resourceVersion */
+                if (action.type == "ERROR") {
+                    if (lastResource) {
+                        lastResource = null;
+                        start_watch();
+                    }
+                    continue;
+                }
+
                 var meta = object.metadata;
-                if (!meta || !meta.uid || object.apiVersion != "v1beta3" || !object.kind) {
-                    console.warn("invalid kubernetes object: ", Object.keys(object).join(", "));
+                if (!meta || !meta.uid || object.apiVersion != "v1" || !object.kind) {
+                    console.warn("invalid kubernetes object: ", object);
                     continue;
                 }
 
                 lastResource = meta.resourceVersion;
 
+                var uid = meta.uid;
                 if (action.type == "ADDED") {
-                    objects[meta.uid] = object;
+                    objects[uid] = object;
                     update(object, type);
                 } else if (action.type == "MODIFIED") {
-                    objects[meta.uid] = object;
+                    load_ready();
+                    objects[uid] = object;
                     update(object, type);
                 } else if (action.type == "DELETED") {
-                    delete objects[meta.uid];
+                    load_ready();
+                    delete objects[uid];
                     remove(object, type);
-
-                /* The watch failed, likely due to invalid resourceVersion */
-                } else if (action.type == "ERROR") {
-                    if (lastResource) {
-                        lastResource = null;
-                        start_watch();
-                    }
-
                 } else {
                     console.warn("invalid watch action type: " + action.type);
-                    continue;
                 }
             }
+
+            load_poke();
         }
 
         function start_watch() {
-            var uri = "/api/v1beta3/watch/" + type;
-            var all, uid;
+            if (req)
+                return;
+
+            var full = true;
+            var uri = endpoint + "/v1/watch/" + type;
+            var params = {};
 
             /*
              * If we have a last resource we can guarantee that we don't miss
@@ -192,14 +352,8 @@ define([
              * have to list everything again. Still watch at the same time though.
              */
             if (lastResource) {
-                uri += "?resourceVersion=" + encodeURIComponent(lastResource);
-
-            /* Tell caller to remove all objects */
-            } else {
-                all = objects;
-                objects = { };
-                for (uid in all)
-                    remove(all[uid], type);
+                params["resourceVersion"] = lastResource;
+                full = false;
             }
 
             /*
@@ -212,140 +366,508 @@ define([
                 blocked = true;
             }, 1000);
 
-            if (req) {
-                req.cancelled = true;
-                req.close();
-            }
-
-            req = api.get(uri)
+            req = api.get(uri, params)
                 .stream(handle_watch)
-                .fail(function(ex) {
+                .response(function() {
+                    load_begin(full);
+                })
+                .always(function() {
                     req = null;
-                    if (!stopping) {
-                        console.warn("watching kubernetes " + type + " failed: " + ex);
-                        wait = window.setTimeout(function() { wait = null; start_watch(); }, 5000);
-                    }
+                })
+                .fail(function(ex, response) {
+                    if (stopping)
+                        return;
+
+                    update_error_message(ex, response);
+                    var msg = "watching kubernetes " + type + " failed: " + ex.message;
+                    if (ex.problem !== "disconnected")
+                        console.warn(msg);
+                    else
+                        debug(msg);
+                    if (loaded.state() == 'pending')
+                        loaded.reject(ex);
+
+                    if (ex.status != 404)
+                        start_watch_later();
                 })
                 .done(function(data) {
-                    var cancelled = req && req.cancelled;
-                    req = null;
-                    if (!stopping && !cancelled) {
-                        if (!blocked) {
-                            console.warn("watching kubernetes " + type + " didn't block");
-                            wait = window.setTimeout(function() { wait = null; start_watch(); }, 5000);
-                        } else {
-                            start_watch();
-                        }
+                    if (stopping)
+                        return;
+                    if (!blocked) {
+                        console.warn("watching kubernetes " + type + " didn't block");
+                        start_watch_later();
+                    } else {
+                        start_watch();
                     }
                 });
         }
 
-        start_watch();
+        /* Waiting to do the next http request */
+        var wait = null;
 
-        self.stop = function stop() {
+        function start_watch_later() {
+            if (!wait) {
+                wait = window.setTimeout(function() {
+                    wait = null;
+                    start_watch();
+                }, 5000);
+            }
+        }
+
+        self.start = function start(http) {
+            stopping = false;
+            if (loaded.state() != 'pending')
+                loaded = $.Deferred();
+            api = http;
+            start_watch();
+        };
+
+        self.wait = function wait() {
+            return loaded.promise();
+        };
+
+        self.stop = function stop(ex) {
             stopping = true;
-            if (req)
-                req.close();
+            var problem;
+            if (req) {
+                if (ex)
+                    problem = ex.problem;
+                req.close(problem || "disconnected");
+                req = null;
+            }
+            if (loaded.state() == 'pending')
+                loaded.reject(ex);
             window.clearTimeout(wait);
             wait = null;
         };
     }
+
+    /*
+     * A helper function that returns a Promise which tries to
+     * connect to a kube-apiserver in various ways in turn.
+     */
+    function connect_api_server() {
+        var dfd = $.Deferred();
+        var req;
+        var aux;
+
+        var schemes = [
+            { port: 8080 },
+            { port: 8443, tls: { }, capabilities: ['tls-certificates'] },
+            { port: 6443, tls: { }, capabilities: ['tls-certificates'] }
+        ];
+
+        function step() {
+            var scheme = schemes.shift();
+
+            /* No further ports to try? */
+            if (!scheme) {
+                var ex = new Error(_("Couldn't find running kube-apiserver"));
+                ex.problem = "not-found";
+                dfd.reject(ex);
+                return;
+            }
+
+            var http = cockpit.http(scheme.port, scheme);
+            var openshift = null;
+
+            /* A supplementary request to check if openshift */
+            aux = http.get(API_OPENSHIFT)
+                .always(function() {
+                    openshift = (this.state() == "resolved");
+                });
+
+            /* The main /api request */
+            req = http.get(API_KUBE)
+                .done(function(data) {
+                    req = null;
+
+                    /*
+                     * We expect a response that looks something like:
+                     * { "versions": [ "v1beta1", "v1beta2", "v1" ] }
+                     */
+                    var response;
+                    try {
+                        response = JSON.parse(data);
+                    } catch(ex) {
+                        debug("not an api endpoint without JSON data on:", scheme);
+                        step();
+                        return;
+                    }
+                    if (response && response.versions) {
+                        aux.always(function() {
+                            response.flavor = openshift ? "openshift" : "kubernetes";
+                            dfd.resolve(http, response);
+                        });
+
+                    } else {
+                        debug("not a kube-apiserver endpoint on:", scheme);
+                        step();
+                    }
+                })
+                .fail(function(ex, response) {
+                    req = null;
+
+                    if (ex.problem === "not-found") {
+                        debug("api endpoint not found on:", scheme);
+                        step();
+                    } else {
+                        if (ex.problem !== "cancelled")
+                            debug("connecting to endpoint failed:", scheme, ex);
+                        dfd.reject(ex, response);
+                    }
+                });
+        }
+
+        /* Load the kube config, and then try to start connecting */
+        cockpit.spawn(["/usr/bin/kubectl", "config", "view", "--output=json", "--raw"])
+            .fail(function(ex, output) {
+                if (output)
+                    console.warn(output);
+                else
+                    console.warn(ex);
+            })
+            .done(function(data) {
+                var scheme = config.parse_scheme(data);
+                debug("kube config scheme:", scheme);
+                schemes.unshift(scheme);
+            })
+            .always(step);
+
+        var promise = dfd.promise();
+        promise.cancel = function cancel() {
+            if (req)
+                req.close("cancelled");
+            return promise;
+        };
+        return promise;
+    }
+
+    /**
+     * KubeList
+     *
+     * An object that contains and optionally tracks a list of
+     * of kubernetes items. The items are indexed by a key
+     * directly on the KubeList. In addition there is a .items
+     * array which presents the objects in a stable array.
+     *
+     * This is returned from client.select() and friends.
+     *
+     * Use with client.track() to subscribe to changes.
+     *
+     * The implementation should make all properties other
+     * than item keys be non-enumerable, so you can enumerate the
+     * properties on this object and only get keys/items.
+     */
+    function KubeList(matcher, client, possible) {
+        Object.defineProperty(this, "data", {
+            enumerable: false,
+            writable: false,
+            value: { }
+        });
+
+        /* Predefine the jQuery expando as non-enumerable */
+        Object.defineProperty(this, $.expando, {
+            enumerable: false,
+            writable: false,
+            value: this.data
+        });
+
+        this.data.matcher = matcher;
+
+        if (possible) {
+            var i, len, item, key;
+            for (i = 0, len = possible.length; i < len; i++) {
+                key = possible[i];
+                item = client.objects[key];
+                if (matcher(item))
+                    this[key] = item;
+            }
+        }
+    }
+
+    Object.defineProperties(KubeList.prototype, {
+        remove: {
+            enumerable: false,
+            writable: false,
+            value: function remove(key, item) {
+                if (key in this) {
+                    delete this[key];
+                    this.trigger("removed", item);
+                }
+            }
+        },
+        update: {
+            enumerable: false,
+            writable: false,
+            value: function update(key, item) {
+                var matched = this.data.matcher(item);
+                var have = (key in this);
+                if (!have && matched) {
+                    this[key] = item;
+                    this.trigger("added", item, key);
+                } else if (have && !matched) {
+                    delete this[key];
+                    this.trigger("removed", item, key);
+                } else if (have && matched) {
+                    this[key] = item;
+                    this.trigger("updated", item, key);
+                }
+            }
+        },
+        trigger: {
+            enumerable: false,
+            writable: false,
+            value: function(name, item, key) {
+                var self = this;
+                self.data.flat = null;
+                var $self = $(self);
+                $self.triggerHandler(name, [item, key]);
+                if (!self.data.timer) {
+                    self.data.timer = window.setTimeout(function() {
+                        self.data.timer = null;
+                        $self.triggerHandler("changed");
+                    }, 100);
+                }
+            }
+        },
+        items: {
+            enumerable: false,
+            get: function items() {
+                var i, l, keys, flat = this.data.flat;
+                if (!flat) {
+                    keys = Object.keys(this).sort();
+                    for (i = 0, l = keys.length, flat = []; i < l; i++)
+                        flat.push(this[keys[i]]);
+                    this.data.flat = flat;
+                }
+                return flat;
+            }
+        }
+    });
 
     /**
      * KubernetesClient
      *
      * Properties:
      *  * objects: a dict of all the loaded kubernetes objects,
-     *             with the 'uid' as the key
+     *             with unique keys
      *  * resourceVersion: latest resourceVersion seen
+     *  * flavor: either 'kubernetes' or 'openshift'
      */
     function KubernetesClient() {
         var self = this;
 
-        var api = cockpit.http(8080);
         self.objects = { };
+        self.resourceVersion = null;
+        self.flavor = null;
+
+        /* Holds the connect api promise */
+        var connected;
+
+        /* The API info returned from /api */
+        var apis;
+
+        /*
+         * connect:
+         * @force: Force a new connection
+         *
+         * Starts connecting to the kube-apiserver if not connected.
+         * This means figuring out which port kube-apiserver is
+         * listening on, and retrieving API information.
+         *
+         * Returns a Promise.
+         *
+         * If already connected, the promise will already be
+         * complete, and any done callbacks will happen
+         * immediately.
+         */
+        self.connect = function connect(force) {
+            if (force || !connected) {
+                connected = connect_api_server()
+                    .done(function(http, response) {
+                        self.flavor = response.flavor;
+                        for (var type in self.watches)
+                            self.watches[type].start(http);
+                    })
+                    .fail(function(ex, response) {
+                        update_error_message(ex, response);
+                        console.warn("Couldn't connect to kubernetes:", ex);
+                        for (var type in self.watches)
+                            self.watches[type].stop(ex);
+                    });
+            }
+
+            return connected;
+        };
+
+        /*
+         * include:
+         * @type: The type of watch to add
+         *
+         * Adds a watcher for a given type.
+         */
+        self.include = function include(type) {
+            var endpoint = TYPE_APIS[type] || API_KUBE;
+            if (!self.watches[type]) {
+                self.watches[type] = new KubernetesWatch(type, endpoint,
+                                                         handle_updated,
+                                                         handle_removed);
+                if (connected) {
+                    connected.done(function(http) {
+                        self.watches[type].start(http);
+                    });
+                }
+            }
+        };
+
+        /* The watch objects we have open */
+        self.watches = { "events": new KubernetesWatch("events", API_KUBE, handle_event, handle_removed) };
+        [ "nodes", "pods", "services", "replicationcontrollers",
+          "namespaces", "endpoints" ].forEach(self.include);
+
+        /*
+         * request:
+         * @req: Object contaning cockpit.http().request() parameter
+         *
+         * Makes a request to kube-apiserver after connecting to it.
+         * This API only supports req/resp style REST calls. For
+         * others use the connect() method directly. In particular there
+         * is no support for streaming.
+         *
+         * The promise returned will resolve when the request is done
+         * with the full response data. Or fail when either connecting
+         * to kubernetes fails, or the request itself fails.
+         *
+         * The returned Promise has a cancel() method.
+         */
+        self.request = function request(options) {
+            var dfd = $.Deferred();
+
+            var req = self.connect();
+            req.done(function(http) {
+                req = http.request(options)
+                    .done(function() {
+                        dfd.resolve.apply(dfd, arguments);
+                    })
+                .fail(function() {
+                    dfd.reject.apply(dfd, arguments);
+                });
+            })
+            .fail(function() {
+                dfd.reject.apply(dfd, arguments);
+            });
+
+            var promise = dfd.promise();
+            promise.cancel = function cancel() {
+                if (req.cancel)
+                    req.cancel();
+                else
+                    req.close("cancelled");
+                return promise;
+            };
+
+            return promise;
+        };
+
+        /*
+         * close:
+         *
+         * Close the connection to kubernetes, cancel any watches.
+         * You can use connect() to connect again.
+         */
+        self.close = function close() {
+            for (var type in self.watches)
+                self.watches[type].stop();
+            tracked = [ ];
+            if (connected) {
+                connected.cancel();
+                connected = null;
+            }
+        };
+
+        /* The tracked objects */
+        var tracked = [];
 
         /* TODO: Derive this value from cluster size */
         var index = new HashIndex(262139);
-        self.resourceVersion = null;
 
-        /* Flattened properties by type, see getters below */
-        var flats = { };
-
-        /* Event timeouts, for collapsing events */
-        var timeouts = { };
-
-        function trigger(type, kind) {
-            delete flats[kind];
-            if (!(type in timeouts)) {
-                timeouts[type] = window.setTimeout(function() {
-                    delete timeouts[type];
-                    $(self).triggerHandler(type);
-                }, 100);
-            }
-        }
-
-        function index_labels(uid, labels, namespace) {
-            var keys, i;
-            if (labels) {
-                keys = [];
-                for (i in labels)
-                    keys.push(namespace + i + labels[i]);
-                index.add(keys, uid);
-            }
-        }
-
+        /* Invoked when a an item is added or changed */
         function handle_updated(item, type) {
             var meta = item.metadata;
 
-            debug("item", item);
+            var key = item.kind + ":" + meta.uid;
+            debug("item", key, item);
 
-            if (meta.resourceVersion && meta.resourceVersion > self.resourceVersion)
-                self.resourceVersion = meta.resourceVersion;
+            var prev = self.objects[key];
+            if (prev && prev.metadata.resourceVersion === version)
+                return;
 
-            var uid = meta.uid;
-            var namespace = meta.namespace;
+            var version = meta.resourceVersion;
+            if (version && version > self.resourceVersion)
+                self.resourceVersion = version;
 
-            self.objects[uid] = item;
+            self.objects[key] = item;
 
             /* Add various bits to index, for quick lookup */
-            index_labels(uid, meta.labels, namespace);
+            var keys = [ item.kind, meta.name, meta.namespace ];
+            var labels, i;
+
+            if (meta.labels) {
+                labels = meta.labels;
+                for (i in labels)
+                    keys.push(i + labels[i]);
+            }
 
             var spec = item.spec;
             if (spec) {
-                index_labels(uid, spec.selector, namespace);
-                if (spec.template && spec.template.metadata)
-                    index_labels(uid, spec.template.metadata.labels, namespace);
+                if (spec.selector) {
+                    labels = spec.selector;
+                    for (i in labels)
+                        keys.push(i + labels[i]);
+                }
+                if (spec.template && spec.template.metadata && spec.template.metadata.labels) {
+                    labels = spec.template.metadata.labels;
+                    for (i in labels)
+                        keys.push(i + labels[i]);
+                }
             }
 
-            /* Add the type for quick lookup */
-            index.add( [ item.kind ], uid);
-
-            /* Index the host for quick lookup */
             var status = item.status;
-            if (spec && spec.host)
-                index.add([ spec.host ], uid);
+            if (spec && spec.nodeName)
+                keys.push(spec.nodeName);
 
-            trigger(type, item.kind);
+            index.add(keys, key);
+
+            /* Fire off any tracked */
+            var len;
+            for (i = 0, len = tracked.length; i < len; i++)
+                tracked[i].update(key, item);
         }
 
         function handle_removed(item, type) {
-            var key = item.metadata.uid;
-            debug("remove", item);
+            var meta = item.metadata;
+            var key = item.kind + ":" + meta.uid;
+
+            debug("remove", key, item);
             delete self.objects[key];
-            trigger(type, item.kind);
+
+            var i, len = tracked.length;
+            for (i = 0; i < len; i++)
+                tracked[i].remove(key, item);
         }
 
         var pulls = { };
         var pull_timeout;
 
         function pull_later(involved) {
-            pulls[involved.uid] = involved;
+            var ikey = involved.kind + ":" + involved.uid;
+            pulls[ikey] = involved;
 
             if (!pull_timeout) {
                 pull_timeout = window.setTimeout(function() {
-                    var items = Object.keys(pulls).map(function(uid) {
-                        return pulls[uid];
+                    var items = Object.keys(pulls).map(function(key) {
+                        return pulls[ikey];
                     });
 
                     pulls = { };
@@ -359,12 +881,13 @@ define([
         }
 
         function pull_involved(involved) {
-            var item = self.objects[involved.uid];
+            var ikey = involved.kind + ":" + involved.uid;
+            var item = self.objects[ikey];
 
             if (item && involved.resourceVersion < item.metadata.resourceVersion)
                 return;
 
-            var uri = "/api/v1beta3";
+            var uri = "/api/v1";
 
             if (involved.namespace)
                 uri += "/namespaces/" + encodeURIComponent(involved.namespace);
@@ -374,10 +897,10 @@ define([
 
             debug("pulling", uri);
 
-            api.get(uri)
+            self.request({ method: "GET", body: "", path: uri })
                 .fail(function(ex) {
                     if (ex.status == 404) {
-                        item = self.objects[involved.uid];
+                        item = self.objects[ikey];
                         if (item) {
                             handle_removed(item, type);
                         }
@@ -386,9 +909,23 @@ define([
                     }
                 })
                 .done(function(data) {
-                    var item = JSON.parse(data);
-                    if (item && item.metadata && item.metadata.uid == involved.uid) {
-                        handle_updated(item, type);
+                    var meta, key, item;
+                    try {
+                        item = JSON.parse(data);
+                    } catch(ex) {
+                        item = null;
+                    }
+                    if (!item || typeof (item) !== "object") {
+                        console.log("got invalid JSON response from kubernetes");
+                        return;
+                    }
+                    if (item) {
+                        meta = item.metadata;
+                        if (meta) {
+                            key = item.kind + ":" + meta.uid;
+                            if (key == ikey)
+                                handle_updated(item, type);
+                        }
                     }
                 });
         }
@@ -400,169 +937,138 @@ define([
             handle_updated(item, type);
         }
 
-        var watches = [
-            new KubernetesWatch(api, "nodes", handle_updated, handle_removed),
-            new KubernetesWatch(api, "pods", handle_updated, handle_removed),
-            new KubernetesWatch(api, "services", handle_updated, handle_removed),
-            new KubernetesWatch(api, "replicationcontrollers", handle_updated, handle_removed),
-            new KubernetesWatch(api, "namespaces", handle_updated, handle_removed),
-            new KubernetesWatch(api, "events", handle_event, handle_removed),
-        ];
-
-        function name_compare(a1, a2) {
-            return (a1.metadata.name || "").localeCompare(a2.metadata.name || "");
+        function match_nothing(item) {
+            return false;
         }
 
-        function timestamp_compare(a1, a2) {
-            return (a1.firstTimestamp || "").localeCompare(a2.firstTimestamp || "");
+        function match_everything(item) {
+            return true;
         }
 
-        function basic_items_getter(kind, compare) {
-            var possible, item, i, len;
-            var flat = flats[kind];
-            if (!flat) {
-                flat = [];
-                possible = index.select([kind]);
-                len = possible.length;
-                for (i = 0; i < len; i++) {
-                    item = self.objects[possible[i]];
-                    if (item && item.kind == kind)
-                        flat.push(item);
+        /**
+         * client.lookup()
+         * @kind: kind of object
+         * @name: name of the object
+         * @namespace: the namespace of the object
+         */
+        this.lookup = function lookup(kind, name, namespace) {
+            var keys = [];
+            if (kind !== undefined)
+                keys.push(kind);
+            if (name !== undefined)
+                keys.push(name);
+            if (namespace !== undefined)
+                keys.push(namespace);
+            var possible = index.all(keys);
+            var item, len = possible.length;
+            for (var i = 0; i < len; i++) {
+                item = self.objects[possible[i]];
+                if (item && item.metadata &&
+                    (kind === undefined || kind === item.kind) &&
+                    (name === undefined || name === item.metadata.name) &&
+                    (namespace === undefined || namespace === item.metadata.namespace)) {
+                    return item;
                 }
-                flat.sort(compare);
-                flats[kind] = flat;
             }
-            return flat;
-        }
-
-        Object.defineProperties(self, {
-            nodes: {
-                enumerable: true,
-                get: function() { return basic_items_getter("Node", name_compare); }
-            },
-            pods: {
-                enumerable: true,
-                get: function() { return basic_items_getter("Pod", name_compare); }
-            },
-            services: {
-                enumerable: true,
-                get: function() { return basic_items_getter("Service", name_compare); }
-            },
-            replicationcontrollers: {
-                enumerable: true,
-                get: function() { return basic_items_getter("ReplicationController", name_compare); }
-            },
-            namespaces: {
-                enumerable: true,
-                get: function() { return basic_items_getter("Namespace", name_compare); }
-            },
-            events: {
-                enumerable: true,
-                get: function() { return basic_items_getter("Event", timestamp_compare); }
-            }
-        });
+            return null;
+        };
 
         /**
          * client.select()
-         * @selector: plain javascript object, JSON label selector
-         * @namespace: the namespace to act in
-         * @type: optional kind string (eg: 'Pod')
+         * @kind: optional kind string (eg: 'Pod')
+         * @namespace: optional namespace to select from
+         * @selector: optional plain javascript object, JSON label selector
          * @template: Match the spec.template instead of labels directly
          *
          * Select objects that match the given labels.
          *
-         * Returns: an array of objects
+         * Returns: kubernetes items
          */
-        this.select = function select(selector, namespace, kind, template) {
-            var i, keys;
-            var possible, match, results = [];
+        this.select = function select(kind, namespace, selector, template) {
+            var i, possible, keys = [];
             if (selector) {
-                keys = [];
                 for (i in selector)
-                    keys.push(namespace + i + selector[i]);
-                possible = index.select(keys);
-            } else {
-                possible = Object.keys(self.objects);
-            }
-            var meta, spec, labels, obj, uid, j, length = possible.length;
-            for (j = 0; j < length; j++) {
-                uid = possible[j];
-                obj = self.objects[uid];
-                if (!obj || !obj.metadata)
-                    continue;
-                meta = obj.metadata;
-                if (meta.namespace !== namespace)
-                    continue;
+                    keys.push(i + selector[i]);
 
-                labels = null;
+                /* Empty selectors should never match anything */
+                if (i === undefined)
+                    return new KubeList(match_nothing, self);
+            }
+            if (kind)
+                keys.push(kind);
+            if (namespace)
+                keys.push(namespace);
+            if (keys.length)
+                possible = index.all(keys);
+            else
+                possible = Object.keys(self.objects);
+
+            function match_select(item) {
+                if (!item || !item.metadata)
+                    return false;
+                if (kind && item.kind !== kind)
+                    return false;
+                var meta = item.metadata;
+                if (namespace && meta.namespace !== namespace)
+                    return false;
+                var labels, spec;
                 if (template) {
-                    spec = obj.spec;
+                    spec = item.spec;
                     if (spec && spec.template && spec.template.metadata)
                         labels = spec.template.metadata.labels;
                 } else {
                     labels = meta.labels;
                 }
-
                 if (selector && !labels)
-                    continue;
-                if (kind && obj.kind !== kind)
-                    continue;
-                match = true;
-                for (i in selector) {
-                    if (labels[i] !== selector[i]) {
-                        match = false;
-                        break;
-                    }
+                    return false;
+                for (var i in selector) {
+                    if (labels[i] !== selector[i])
+                        return false;
                 }
-                if (match)
-                    results.push(obj);
+                return true;
             }
-            return results;
+
+            return new KubeList(match_select, self, possible);
         };
 
         /**
          * client.infer()
-         * @labels: plain javascript object, JSON labels
-         * @namespace: the namespace to act in
          * @kind: optional kind string
+         * @namespace: the namespace to act in
+         * @labels: plain javascript object, JSON labels
          *
          * Infer which objects that have selectors would have
          * matched the given labels.
          */
-        this.infer = function infer(labels, namespace, kind) {
-            var i, keys;
-            var possible, match, results = [];
+        this.infer = function infer(kind, namespace, labels) {
+            var i, possible, keys = [];
             if (labels) {
-                keys = [];
                 for (i in labels)
-                    keys.push(namespace + i + labels[i]);
-                possible = index.select(keys);
-            } else {
-                possible = Object.keys(self.objects);
+                    keys.push(i + labels[i]);
             }
-            var obj, uid, j, length = possible.length;
-            for (j = 0; j < length; j++) {
-                uid = possible[j];
-                obj = self.objects[uid];
-                if (!obj || !obj.metadata || !obj.spec || !obj.spec.selector)
-                    continue;
-                if (obj.metadata.namespace !== namespace)
-                    continue;
-                if (kind && obj.kind !== kind)
-                    continue;
-                match = true;
+            if (keys.length)
+                possible = index.any(keys);
+            else
+                possible = Object.keys(self.objects);
+
+            function match_infer(item) {
+                if (!item || !item.metadata || !item.spec || !item.spec.selector)
+                    return false;
+                if (namespace && item.metadata.namespace !== namespace)
+                    return false;
+                if (kind && item.kind !== kind)
+                    return false;
+                var i;
                 if (labels) {
-                    for (i in obj.spec.selector) {
-                        if (labels[i] !== obj.spec.selector[i]) {
-                            match = false;
-                            break;
-                        }
+                    for (i in item.spec.selector) {
+                        if (labels[i] !== item.spec.selector[i])
+                            return false;
                     }
                 }
-                if (match)
-                    results.push(obj);
+                return true;
             }
-            return results;
+
+            return new KubeList(match_infer, self, possible);
         };
 
         /**
@@ -574,53 +1080,91 @@ define([
          * have a obj.status.host property equal to the @host name passed into
          * this function.
          *
-         * Returns: an array of kubernetes objects
+         * Returns: kubernetes items
          */
-        this.hosting = function hosting(host, kind) {
-            var possible = index.select([ host ]);
-            var obj, j, length = possible.length;
-            var results = [];
-            for (j = 0; j < length; j++) {
-                obj = self.objects[possible[j]];
-                if (!obj || !obj.spec || obj.spec.host != host)
-                    continue;
-                if (kind && obj.kind !== kind)
-                    continue;
-                results.push(obj);
+        this.hosting = function hosting(kind, host) {
+            var possible = index.all([ host ]);
+
+            function match_hosting(item) {
+                if (!item || !item.spec || item.spec.nodeName != host)
+                    return false;
+                if (kind && item.kind !== kind)
+                    return false;
+                return true;
             }
+
+            return new KubeList(match_hosting, self, possible);
+        };
+
+        /*
+         * Maps an array of objects with a name property to a
+         * map with the name as the key.
+         */
+        function map_named_array(array) {
+            var result = { };
+            var i, len;
+            if (array) {
+                for (i = 0, len = array.length; i < len; i++)
+                    result[array[i].name] = array[i];
+            }
+            return result;
+        }
+
+        /**
+         * client.containers()
+         * @pod: The pod javascript to build container objects for.
+         *
+         * Build fake container objects with a spec/status for the various
+         * containers in the pod. The resulting objects are not real kubernetes
+         * objects, but are useful when dealing with information about a
+         * container.
+         *
+         * They look like this:
+         *   { spec: pod.spec.containers[n], status: pod.status.containerStatuses[n] }
+         *
+         * The returned array will not change once created for a given pod item.
+         */
+        this.containers = function containers(pod) {
+            var results = pod.containers;
+
+            var specs, statuses;
+            if (!results) {
+                if (pod.spec)
+                    specs = map_named_array(pod.spec.containers);
+                else
+                    specs = { };
+                if (pod.status)
+                    statuses = map_named_array(pod.status.containerStatuses);
+                else
+                    statuses = { };
+                results = Object.keys(specs).map(function(name) {
+                    return { spec: specs[name], status: statuses[name] };
+                });
+
+                /* Note that the returned value has to be stable, so stash it on the pod */
+                Object.defineProperty(pod, "containers", { enumerable: false, value: results });
+            }
+
             return results;
         };
 
-        this.delete_pod = function delete_pod(ns, pod_name) {
-            api.request({
-                "method": "DELETE",
-                "body": "",
-                "path": "/api/v1beta3/namespaces/" + ns + "/pods/" + encodeURIComponent(pod_name)
-            }).fail(failure);
-        };
-
-        this.delete_node = function delete_node(ns, nodes_name) {
-            api.request({
-                "method": "DELETE",
-                "body": "",
-                "path": "/api/v1beta3/namespaces/" + ns + "/nodes/" + encodeURIComponent(nodes_name)
-            }).fail(failure);
-        };
-
-        this.delete_replicationcontroller = function delete_replicationcontroller(ns, rc_name) {
-            api.request({
-                "method": "DELETE",
-                "body": "",
-                "path": "/api/v1beta3/namespaces/" + ns + "/replicationcontrollers/" + encodeURIComponent(rc_name)
-            }).fail(failure);
-        };
-
-        this.delete_service = function delete_service(ns, service_name) {
-            api.request({
-                "method": "DELETE",
-                "body": "",
-                "path": "/api/v1beta3/namespaces/" + ns + "/services/" + encodeURIComponent(service_name)
-            }).fail(failure);
+        /**
+         * client.track(items)
+         * client.track(items, false)
+         * @items: a set of items returned by client.select() or friends
+         * @add: whether to add or remove subscription, default add
+         *
+         * Updates the set of items when stuff that they match changes.
+         */
+        self.track = function track(items, add) {
+            if (add === false) {
+                tracked = tracked.filter(function(l) {
+                    return items !== l;
+                });
+                return null;
+            } else {
+                tracked.push(items);
+            }
         };
 
         function DataError(message, ex) {
@@ -631,6 +1175,40 @@ define([
 
         function kind_is_namespaced(kind) {
             return kind != "Node" && kind != "Namespace";
+        }
+
+        function create_preference(kind) {
+            switch(kind) {
+
+            /*
+             * Namespaces should be created first, as they must
+             * exist before objects in them are created.
+             */
+            case "Namespace":
+                return 0;
+
+            /*
+             * Services should be created before pods (or replication controllers
+             * that make pods. This is because of the environment variables that
+             * pods get when they want to access a service.
+             */
+            case "Service":
+                return 1;
+
+            /*
+             * Create these before replication controllers ... corner case, but
+             * keeps things sane.
+             */
+            case "Pod":
+                return 2;
+
+            default:
+                return 5;
+            }
+        }
+
+        function create_compare(a, b) {
+            return create_preference(a.kind) - create_preference(b.kind);
         }
 
         /**
@@ -686,7 +1264,7 @@ define([
                 if (valid) {
                     /* The remainder of the errors are handled by kubernetes itself */
                     if (!item.kind || !item.metadata ||
-                        item.apiVersion != "v1beta3" ||
+                        item.apiVersion != "v1" ||
                         typeof item.kind !== "string") {
                         dfd.reject(new DataError(_("Unsupported kubernetes object in data")));
                         valid = false;
@@ -709,13 +1287,16 @@ define([
             /* Create the namespace if it exists */
             if (!have_ns && need_ns) {
                 items.unshift({
-                    "apiVersion" : "v1beta3",
+                    "apiVersion" : "v1",
                     "kind" : "Namespace",
                     "metadata" : {
                         "name": namespace
                     }
                 });
             }
+
+            /* Now sort the array with create preference */
+            items.sort(create_compare);
 
             function step() {
                 var item = items.shift();
@@ -730,14 +1311,14 @@ define([
 
                 /* Sad but true */
                 var type = kind.toLowerCase() + "s";
-                var url = "/api/v1beta3";
+                var url = "/api/v1";
                 if (kind_is_namespaced (kind))
                     url += "/namespaces/" + encodeURIComponent(namespace);
                 url += "/" + type;
 
                 debug("create item:", url, item);
 
-                request = api.post(url, JSON.stringify(item))
+                request = self.request({ method: "POST", path: url, body: JSON.stringify(item) })
                     .done(function(data) {
                         request = null;
                         var item;
@@ -748,6 +1329,8 @@ define([
                             console.log("received invalid JSON response from kubernetes", ex);
                             return;
                         }
+
+                        debug("created item:", url, item);
 
                         handle_updated(item, type);
                         step();
@@ -780,6 +1363,11 @@ define([
             }
 
             step();
+
+            promise.cancel = function cancel() {
+                if (request)
+                    request.cancel();
+            };
             return promise;
         };
 
@@ -789,7 +1377,7 @@ define([
             if (link.metadata)
                 link = link.metadata.selfLink;
 
-            var req = api.get(link)
+            var req = self.request({ method: "GET", path: link, body: "" })
                 .fail(function(ex) {
                     dfd.reject(ex);
                 })
@@ -801,7 +1389,7 @@ define([
                         return;
                     }
 
-                    req = api.request({ method: "PUT", body: JSON.stringify(item), path: link })
+                    req = self.request({ method: "PUT", body: JSON.stringify(item), path: link })
                         .fail(function(ex) {
                             dfd.reject(ex);
                         })
@@ -811,70 +1399,32 @@ define([
                 });
 
             var promise = dfd.promise();
-            dfd.cancel = function cancel() {
-                req.close("cancelled");
+            promise.cancel = function cancel() {
+                req.cancel();
             };
 
             return promise;
         };
 
-        self.close = function close() {
-            var w = watches;
-            watches = [ ];
-            $.each(w, function(i, wc) {
-                wc.stop();
+        /**
+         * remove:
+         * @link: a kubernetes item, or selfLink path
+         *
+         * Remove the item from Kubernetes.
+         *
+         * Returns a promise.
+         */
+        self.remove = function remove(link) {
+            if (link.metadata)
+                link = link.metadata.selfLink;
+            return self.request({
+                method: "DELETE",
+                path: link,
+                body: ""
             });
         };
-    }
 
-    function EtcdClient() {
-        var self = this;
-
-        var etcd_api = cockpit.http(7001);
-        var first = true;
-        var reqs = [];
-        var later;
-
-        function receive(data, what ,kind) {
-            var resp = JSON.parse(data);
-            self[what] = resp;
-
-            if (!first)
-                $(self).triggerHandler(what, [ self[what] ]);
-        }
-
-        function update() {
-
-            reqs.push(etcd_api.get("/v2/admin/machines")
-                .fail(failure)
-                .done(function(data) {
-                    receive(data, "etcdHosts");
-                }));
-
-            reqs.push(etcd_api.get("/v2/keys/coreos.com/network/config")
-                .fail(failure)
-                .done(function(data) {
-                    receive(data, "flannelConfig");
-                }));
-
-            if (first) {
-                $.when.apply($, reqs)
-                    .always(function() {
-                        first = false;
-                        $(self).triggerHandler("etcdHosts", [ self.etcdHosts ]);
-                    });
-            }
-        }
-
-        update();
-
-        self.close = function close() {
-            var r = reqs;
-            reqs = [];
-            r.forEach(function(req) {
-                req.close();
-            });
-        };
+        self.connect();
     }
 
     /*
@@ -917,7 +1467,192 @@ define([
     }
 
     kubernetes.k8client = singleton(KubernetesClient);
-    kubernetes.etcdclient = singleton(EtcdClient);
+
+    function CAdvisor(node) {
+        var self = this;
+
+        /* cAdvisor has second intervals */
+        var interval = 1000;
+
+        var kube = kubernetes.k8client();
+
+        var last = { };
+
+        var unique = 0;
+
+        var requests = { };
+
+        /* Holds the container specs */
+        self.specs = { };
+
+        function feed(containers) {
+            var x, y, ylen, i, len;
+            var item, offset, timestamp, container, stat;
+
+            /*
+             * The cAdvisor data doesn't seem to have inherent guarantees of
+             * continuity or regularity. In theory each stats object can have
+             * it's own arbitrary timestamp ... although in practice they do
+             * generally follow the interval to within a few milliseconds.
+             *
+             * So we first look for the lowest timestamp, treat that as our
+             * base index, and then batch the data based on that.
+             */
+
+            var first = null;
+
+            for (x in containers) {
+                container = containers[x];
+                if (container.stats) {
+                    len = container.stats.length;
+                    for (i = 0; i < len; i++) {
+                        timestamp = container.stats[i].timestamp;
+                        if (timestamp) {
+                            if (first === null || timestamp < first)
+                                first = timestamp;
+                        }
+                    }
+                }
+            }
+
+            if (first === null)
+                return;
+
+            var base = Math.floor(new Date(first).getTime() / interval);
+
+            var items = [];
+            var name, mapping = { };
+            var signal, id;
+            var names = { };
+
+            for (x in containers) {
+                container = containers[x];
+
+                /*
+                 * This builds the correct type of object graph for the
+                 * paths seen in grid.add() to operate on
+                 */
+                name = container.name;
+                if (!name)
+                    continue;
+
+                names[name] = name;
+                mapping[name] = { "": name };
+                id = name;
+
+                if (container.aliases) {
+                    ylen = container.aliases.length;
+                    for (y = 0; y < ylen; y++) {
+                        mapping[container.aliases[y]] = { "": name };
+
+                        /* Try to use the real docker container id as our id */
+                        if (container.aliases[y].length === 64)
+                            id = container.aliases[y];
+                    }
+                }
+
+                if (id && container.spec) {
+                    signal = !(id in self.specs);
+                    self.specs[id] = container.spec;
+                    if (signal) {
+                        $(self).triggerHandler("container", [ id ]);
+                    }
+                }
+
+                if (container.stats) {
+                    len = container.stats.length;
+                    for (i = 0; i < len; i++) {
+                        stat = container.stats[i];
+                        if (!stat.timestamp)
+                            continue;
+
+                        /* Convert the timestamp into an index */
+                        offset = Math.floor(new Date(stat.timestamp).getTime() / interval);
+
+                        item = items[offset - base];
+                        if (!item)
+                            item = items[offset - base] = { };
+                        item[name] = stat;
+                    }
+                }
+            }
+
+            /* Make sure each offset has something */
+            len = items.length;
+            for (i = 0; i < len; i++) {
+                if (items[i] === undefined)
+                    items[i] = { };
+            }
+
+            /* Now for each offset, if it's a duplicate, put in a copy */
+            for(name in names) {
+                len = items.length;
+                for (i = 0; i < len; i++) {
+                    if (items[i][name] === undefined)
+                        items[i][name] = last[name];
+                    else
+                        last[name] = items[i][name];
+                }
+            }
+
+            self.series.input(base, items, mapping);
+        }
+
+        function request(query) {
+            var body = JSON.stringify(query);
+
+            /* Only one request active at a time for any given body */
+            if (!kube || body in requests)
+                return;
+
+            var req = kube.request({
+                method: "POST",
+                path: "/api/v1/proxy/nodes/" + encodeURIComponent(node) + ":4194/api/v1.2/docker",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(query)
+            });
+
+            requests[body] = req;
+            req.always(function() {
+                delete requests[body];
+            })
+            .done(function(data) {
+                feed(JSON.parse(data));
+            })
+            .fail(function(ex) {
+                console.warn(ex);
+            });
+        }
+
+        self.fetch = function fetch(beg, end) {
+            var query;
+            if (!beg || !end) {
+                query = { num_stats: 60 };
+            } else {
+                query = {
+                    start: new Date((beg - 1) * interval).toISOString(),
+                    end: new Date(end * interval).toISOString()
+                };
+            }
+            request(query);
+        };
+
+        self.close = function close() {
+            var req, body;
+            for (body in requests) {
+                req = requests[body];
+                if (req && req.close)
+                    req.close();
+            }
+            kube.close();
+            kube = null;
+        };
+
+        var cache = "cadv1-" + (node || null);
+        self.series = cockpit.series(interval, cache, self.fetch);
+    }
+
+    kubernetes.cadvisor = singleton(CAdvisor);
 
     return kubernetes;
 });

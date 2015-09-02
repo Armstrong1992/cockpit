@@ -28,6 +28,9 @@
 
 #include <gio/gunixsocketaddress.h>
 
+#include <glib/gstdio.h>
+
+#include <errno.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -59,6 +62,7 @@ struct _CockpitChannelPrivate {
     CockpitTransport *transport;
     gchar *id;
     JsonObject *open_options;
+    gchar **capabilities;
 
     /* Queued messages before channel is ready */
     gboolean ready;
@@ -93,6 +97,7 @@ enum {
     PROP_TRANSPORT,
     PROP_ID,
     PROP_OPTIONS,
+    PROP_CAPABILITIES,
 };
 
 static guint cockpit_channel_sig_closed;
@@ -281,12 +286,87 @@ cockpit_channel_constructed (GObject *object)
 
   g_return_if_fail (self->priv->id != NULL);
 
+  self->priv->capabilities = NULL;
   self->priv->recv_sig = g_signal_connect (self->priv->transport, "recv",
                                            G_CALLBACK (on_transport_recv), self);
   self->priv->control_sig = g_signal_connect (self->priv->transport, "control",
                                               G_CALLBACK (on_transport_control), self);
   self->priv->close_sig = g_signal_connect (self->priv->transport, "closed",
                                             G_CALLBACK (on_transport_closed), self);
+}
+
+
+static gboolean
+strv_contains (gchar **strv,
+               gchar *str)
+{
+  g_return_val_if_fail (strv != NULL, FALSE);
+  g_return_val_if_fail (str != NULL, FALSE);
+
+  for (; *strv != NULL; strv++)
+    {
+      if (g_str_equal (str, *strv))
+        return TRUE;
+    }
+  return FALSE;
+}
+
+static gboolean
+cockpit_channel_ensure_capable (CockpitChannel *channel,
+                                JsonObject *options)
+{
+  gchar **capabilities = NULL;
+  JsonObject *close_options = NULL; // owned by channel
+  gboolean missing = FALSE;
+  gboolean ret = FALSE;
+  gint len;
+  gint i;
+
+  if (!cockpit_json_get_strv (options, "capabilities", NULL, &capabilities))
+    {
+      g_message ("got invalid capabilities field in open message");
+      cockpit_channel_close (channel, "protocol-error");
+      goto out;
+    }
+
+  if (!capabilities)
+    {
+      ret = TRUE;
+      goto out;
+    }
+
+  len = g_strv_length (capabilities);
+  for (i = 0; i < len; i++)
+    {
+      if (channel->priv->capabilities == NULL ||
+          !strv_contains(channel->priv->capabilities, capabilities[i]))
+        {
+          g_message ("unsupported capability required: %s", capabilities[i]);
+          missing = TRUE;
+        }
+    }
+
+  if (missing)
+    {
+      JsonArray *arr = json_array_new (); // owned by closed options
+
+      if (channel->priv->capabilities != NULL)
+        {
+          len = g_strv_length (channel->priv->capabilities);
+          for (i = 0; i < len; i++)
+            json_array_add_string_element (arr, channel->priv->capabilities[i]);
+        }
+
+      close_options = cockpit_channel_close_options (channel);
+      json_object_set_array_member (close_options, "capabilities", arr);
+      cockpit_channel_close (channel, "not-supported");
+    }
+
+  ret = !missing;
+
+out:
+  g_free (capabilities);
+  return ret;
 }
 
 static void
@@ -298,6 +378,9 @@ cockpit_channel_real_prepare (CockpitChannel *channel)
   const gchar *payload;
 
   options = cockpit_channel_get_options (self);
+
+  if (!cockpit_channel_ensure_capable (self, options))
+    return;
 
   if (G_OBJECT_TYPE (channel) == COCKPIT_TYPE_CHANNEL)
     {
@@ -378,6 +461,10 @@ cockpit_channel_set_property (GObject *object,
     case PROP_OPTIONS:
       self->priv->open_options = g_value_dup_boxed (value);
       break;
+    case PROP_CAPABILITIES:
+      g_return_if_fail (self->priv->capabilities == NULL);
+      self->priv->capabilities = g_value_dup_boxed (value);
+      break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
       break;
@@ -431,6 +518,8 @@ cockpit_channel_finalize (GObject *object)
     json_object_unref (self->priv->open_options);
   if (self->priv->close_options)
     json_object_unref (self->priv->close_options);
+
+  g_strfreev (self->priv->capabilities);
   g_free (self->priv->id);
 
   G_OBJECT_CLASS (cockpit_channel_parent_class)->finalize (object);
@@ -522,6 +611,18 @@ cockpit_channel_class_init (CockpitChannelClass *klass)
                                    g_param_spec_boxed ("options", "options", "options", JSON_TYPE_OBJECT,
                                                        G_PARAM_WRITABLE | G_PARAM_CONSTRUCT_ONLY | G_PARAM_STATIC_STRINGS));
 
+                                                         /**
+   * CockpitChannel:capabilities:
+   *
+   * The capabilties that this channel supports.
+   */
+  g_object_class_install_property (gobject_class, PROP_CAPABILITIES,
+                                   g_param_spec_boxed ("capabilities",
+                                                       "Capabilities",
+                                                       "Channel Capabilities",
+                                                       G_TYPE_STRV,
+                                                       G_PARAM_WRITABLE | G_PARAM_STATIC_STRINGS));
+
   /**
    * CockpitChannel::closed:
    *
@@ -535,6 +636,7 @@ cockpit_channel_class_init (CockpitChannelClass *klass)
                                              NULL, NULL, NULL, G_TYPE_NONE, 1, G_TYPE_STRING);
 
   g_type_class_add_private (klass, sizeof (CockpitChannelPrivate));
+
 
   /*
    * If we're running under a test server, register that server's HTTP address
@@ -832,6 +934,14 @@ cockpit_channel_done (CockpitChannel *self)
 
 static GHashTable *internal_addresses;
 
+static void
+safe_unref (gpointer data)
+{
+  GObject *object = data;
+  if (object != NULL)
+    g_object_unref (object);
+}
+
 void
 cockpit_channel_internal_address (const gchar *name,
                                   GSocketAddress *address)
@@ -839,21 +949,36 @@ cockpit_channel_internal_address (const gchar *name,
   if (!internal_addresses)
     {
       internal_addresses = g_hash_table_new_full (g_str_hash, g_str_equal,
-                                                  g_free, g_object_unref);
+                                                  g_free, safe_unref);
     }
 
-  g_hash_table_replace (internal_addresses, g_strdup (name), g_object_ref (address));
+  if (address)
+    address = g_object_ref (address);
+
+  g_hash_table_replace (internal_addresses, g_strdup (name), address);
+}
+
+gboolean
+cockpit_channel_remove_internal_address (const gchar *name)
+{
+  gboolean ret = FALSE;
+  if (internal_addresses)
+      ret = g_hash_table_remove (internal_addresses, name);
+  return ret;
 }
 
 GSocketConnectable *
 cockpit_channel_parse_connectable (CockpitChannel *self,
-                                   gchar **possible_name)
+                                   gchar **possible_name,
+                                   gboolean *local_address)
 {
   const gchar *problem = "protocol-error";
   GSocketConnectable *connectable = NULL;
   const gchar *unix_path;
   const gchar *internal;
+  const gchar *address;
   JsonObject *options;
+  gboolean local = FALSE;
   GError *error = NULL;
   const gchar *host;
   gint64 port;
@@ -874,6 +999,11 @@ cockpit_channel_parse_connectable (CockpitChannel *self,
       g_warning ("invalid \"internal\" option in channel");
       goto out;
     }
+  if (!cockpit_json_get_string (options, "address", NULL, &address))
+    {
+      g_warning ("invalid \"address\" option in channel");
+      goto out;
+    }
 
   if (port != G_MAXINT64 && unix_path)
     {
@@ -888,16 +1018,27 @@ cockpit_channel_parse_connectable (CockpitChannel *self,
           goto out;
         }
 
-      if (cockpit_bridge_local_address)
+      if (address)
+        {
+          connectable = g_network_address_new (address, port);
+          host = address;
+
+          /* This isn't perfect, but matches the use case. Specify address => non-local */
+          local = FALSE;
+        }
+      else if (cockpit_bridge_local_address)
         {
           connectable = g_network_address_parse (cockpit_bridge_local_address, port, &error);
           host = cockpit_bridge_local_address;
+          local = TRUE;
         }
       else
         {
           connectable = cockpit_loopback_new (port);
           host = "localhost";
+          local = TRUE;
         }
+
       if (error != NULL)
         {
           g_warning ("couldn't parse local address: %s: %s", host, error->message);
@@ -915,14 +1056,24 @@ cockpit_channel_parse_connectable (CockpitChannel *self,
       if (possible_name)
         *possible_name = g_strdup (unix_path);
       connectable = G_SOCKET_CONNECTABLE (g_unix_socket_address_new (unix_path));
+      local = FALSE;
     }
   else if (internal)
     {
+      gboolean reg = FALSE;
       if (internal_addresses)
-        connectable = g_hash_table_lookup (internal_addresses, internal);
+        {
+          reg = g_hash_table_lookup_extended(internal_addresses,
+                                             internal,
+                                             NULL,
+                                             (gpointer *)&connectable);
+        }
+
       if (!connectable)
         {
-          g_warning ("couldn't find internal address: %s", internal);
+          if (!reg)
+            g_warning ("couldn't find internal address: %s", internal);
+
           problem = "not-found";
           goto out;
         }
@@ -930,6 +1081,7 @@ cockpit_channel_parse_connectable (CockpitChannel *self,
       if (possible_name)
         *possible_name = g_strdup (internal);
       connectable = g_object_ref (connectable);
+      local = FALSE;
     }
   else
     {
@@ -948,6 +1100,11 @@ out:
         g_object_unref (connectable);
       connectable = NULL;
     }
+  else
+    {
+      if (local_address)
+        *local_address = local;
+    }
   return connectable;
 }
 
@@ -961,7 +1118,7 @@ cockpit_channel_parse_address (CockpitChannel *self,
   GError *error = NULL;
   gchar *name = NULL;
 
-  connectable = cockpit_channel_parse_connectable (self, &name);
+  connectable = cockpit_channel_parse_connectable (self, &name, NULL);
   if (!connectable)
     return NULL;
 
@@ -989,13 +1146,212 @@ cockpit_channel_parse_address (CockpitChannel *self,
   return address;
 }
 
+static const gchar *
+parse_option_file_or_data (JsonObject *options,
+                           const gchar *option,
+                           const gchar **file,
+                           const gchar **data)
+{
+  JsonObject *object;
+  JsonNode *node;
+
+  g_assert (file != NULL);
+  g_assert (data != NULL);
+
+  node = json_object_get_member (options, option);
+  if (!node)
+    {
+      *file = NULL;
+      *data = NULL;
+      return NULL;
+    }
+
+  if (!JSON_NODE_HOLDS_OBJECT (node))
+    {
+      g_warning ("invalid \"%s\" tls option for channel", option);
+      return "protocol-error";
+    }
+
+  object = json_node_get_object (node);
+
+  if (!cockpit_json_get_string (object, "file", NULL, file))
+    {
+      g_warning ("invalid \"file\" %s option for channel", option);
+      return "protocol-error";
+    }
+  else if (!cockpit_json_get_string (object, "data", NULL, data))
+    {
+      g_warning ("invalid \"data\" %s option for channel", option);
+      return "protocol-error";
+    }
+  else if (!*file && !*data)
+    {
+      g_warning ("missing or unsupported \"%s\" option for channel", option);
+      return "not-supported";
+    }
+  else if (*file && *data)
+    {
+      g_warning ("cannot specify both \"file\" and \"data\" in \"%s\" option for channel", option);
+      return "protocol-error";
+    }
+
+  return NULL;
+}
+
+static const gchar *
+load_pem_contents (const gchar *filename,
+                   const gchar *option,
+                   GString *pem)
+{
+  const gchar *ret = NULL;
+  GError *error = NULL;
+  gchar *contents = NULL;
+  gsize len;
+
+  if (!g_file_get_contents (filename, &contents, &len, &error))
+    {
+      g_warning ("couldn't load \"%s\" file: %s: %s", option, filename, error->message);
+      ret = "internal-error";
+      g_clear_error (&error);
+    }
+  else
+    {
+      g_string_append_len (pem, contents, len);
+      g_string_append_c (pem, '\n');
+      g_free (contents);
+    }
+
+  return ret;
+}
+
+static gchar *
+expand_filename (const gchar *filename)
+{
+  if (!g_path_is_absolute (filename))
+    return g_build_filename (g_get_home_dir (), filename, NULL);
+  else
+    return g_strdup (filename);
+}
+
+static const gchar *
+parse_cert_option_as_pem (JsonObject *options,
+                          const gchar *option,
+                          GString *pem)
+{
+  const gchar *problem = NULL;
+  const gchar *file;
+  const gchar *data;
+  gchar *path;
+
+  problem = parse_option_file_or_data (options, option, &file, &data);
+  if (problem)
+    return problem;
+
+  if (file)
+    {
+      path = expand_filename (file);
+
+      /* For now we assume file contents are PEM */
+      problem = load_pem_contents (path, option, pem);
+
+      g_free (path);
+    }
+  else if (data)
+    {
+      /* Format this as PEM of the given type */
+      g_string_append (pem, data);
+      g_string_append_c (pem, '\n');
+    }
+
+  return problem;
+}
+
+static const gchar *
+parse_cert_option_as_database (JsonObject *options,
+                               const gchar *option,
+                               GTlsDatabase **database)
+{
+  gboolean temporary = FALSE;
+  GError *error = NULL;
+  const gchar *problem;
+  const gchar *file;
+  const gchar *data;
+  gchar *path;
+  gint fd;
+
+  problem = parse_option_file_or_data (options, option, &file, &data);
+  if (problem)
+    return problem;
+
+  if (file)
+    {
+      path = expand_filename (file);
+      problem = NULL;
+    }
+  else if (data)
+    {
+      temporary = TRUE;
+      path = g_build_filename (g_get_user_runtime_dir (), "cockpit-bridge-cert-authority.XXXXXX", NULL);
+      fd = g_mkstemp (path);
+      if (fd < 0)
+        {
+          g_warning ("couldn't create temporary directory: %s: %s", path, g_strerror (errno));
+          problem = "internal-error";
+        }
+      else
+        {
+          close (fd);
+          if (!g_file_set_contents (path, data, -1, &error))
+            {
+              g_warning ("couldn't write temporary data to: %s: %s", path, error->message);
+              problem = "internal-error";
+              g_clear_error (&error);
+            }
+        }
+    }
+  else
+    {
+      /* Not specified */
+      *database = NULL;
+      return NULL;
+    }
+
+  if (problem == NULL)
+    {
+      *database = g_tls_file_database_new (path, &error);
+      if (error)
+        {
+          g_warning ("couldn't load certificate data: %s: %s", path, error->message);
+          problem = "internal-error";
+          g_clear_error (&error);
+        }
+    }
+
+  /* Leave around when problem, for debugging */
+  if (temporary && problem == NULL)
+    g_unlink (path);
+
+  g_free (path);
+
+  return problem;
+}
+
 CockpitStreamOptions *
-cockpit_channel_parse_stream (CockpitChannel *self)
+cockpit_channel_parse_stream (CockpitChannel *self,
+                              gboolean local_address)
 {
   const gchar *problem = "protocol-error";
+  GTlsCertificate *cert = NULL;
+  GTlsDatabase *database = NULL;
   CockpitStreamOptions *ret;
   gboolean use_tls = FALSE;
+  GError *error = NULL;
+  GString *pem = NULL;
+  JsonObject *options;
   JsonNode *node;
+
+  /* No validation for local servers by default */
+  gboolean validate = !local_address;
 
   node = json_object_get_member (self->priv->open_options, "tls");
   if (node && !JSON_NODE_HOLDS_OBJECT (node))
@@ -1003,21 +1359,92 @@ cockpit_channel_parse_stream (CockpitChannel *self)
       g_warning ("invalid \"tls\" option for channel");
       goto out;
     }
+  else if (node)
+    {
+      options = json_node_get_object (node);
+      use_tls = TRUE;
 
-  use_tls = node != NULL;
+      /*
+       * The only function in GLib to parse private keys takes
+       * them in PEM concatenated form. This is a limitation of GLib,
+       * rather than concatenated form being a decent standard for
+       * certificates and keys. So build a combined PEM as expected by
+       * GLib here.
+       */
+
+      pem = g_string_sized_new (8192);
+
+      problem = parse_cert_option_as_pem (options, "certificate", pem);
+      if (problem)
+        goto out;
+
+      if (pem->len)
+        {
+          problem = parse_cert_option_as_pem (options, "key", pem);
+          if (problem)
+            goto out;
+
+          cert = g_tls_certificate_new_from_pem (pem->str, pem->len, &error);
+          if (error != NULL)
+            {
+              g_warning ("invalid \"certificate\" or \"key\" content: %s", error->message);
+              g_error_free (error);
+              problem = "internal-error";
+              goto out;
+            }
+        }
+
+      problem = parse_cert_option_as_database (options, "authority", &database);
+      if (problem)
+        goto out;
+
+      if (!cockpit_json_get_bool (options, "validate", validate, &validate))
+        {
+          g_warning ("invalid \"validate\" option");
+          problem = "protocol-error";
+          goto out;
+        }
+    }
+
   problem = NULL;
 
 out:
   if (problem)
     {
       cockpit_channel_close (self, problem);
-      return NULL;
+      ret = NULL;
+    }
+  else
+    {
+      ret = g_new0 (CockpitStreamOptions, 1);
+      ret->refs = 1;
+      ret->tls_client = use_tls;
+      ret->tls_cert = cert;
+      cert = NULL;
+
+      if (database)
+        {
+          ret->tls_database = database;
+          ret->tls_client_flags = G_TLS_CERTIFICATE_VALIDATE_ALL;
+          if (!validate)
+              ret->tls_client_flags &= ~(G_TLS_CERTIFICATE_INSECURE | G_TLS_CERTIFICATE_BAD_IDENTITY);
+          database = NULL;
+        }
+      else
+        {
+          if (validate)
+            ret->tls_client_flags = G_TLS_CERTIFICATE_VALIDATE_ALL;
+          else
+            ret->tls_client_flags = G_TLS_CERTIFICATE_GENERIC_ERROR;
+        }
     }
 
-  ret = g_new0 (CockpitStreamOptions, 1);
-  ret->refs = 1;
-  ret->tls_client = use_tls;
-  ret->tls_client_flags = 0; /* No validation for local servers */
+  if (pem)
+    g_string_free (pem, TRUE);
+  if (cert)
+    g_object_unref (cert);
+  if (database)
+    g_object_unref (database);
 
   return ret;
 }
